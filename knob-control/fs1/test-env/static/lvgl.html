@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>LVGL Simulator</title>
+<style>
+  body { margin: 0; padding: 0; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
+  #canvas { width: 360px; height: 360px; display: block; }
+  #loading { color: #888; font-family: sans-serif; font-size: 14px; text-align: center; padding: 40px; position: absolute; }
+</style>
+</head>
+<body>
+<div id="loading">Loading LVGL + MicroPython...</div>
+<canvas id="canvas" width="360" height="360"></canvas>
+
+<script src="wasm_file_api.js"></script>
+<script>
+// Set up Module before loading micropython.js
+var canvas = document.getElementById('canvas');
+Module = {
+  canvas: canvas,
+  print: function(text) { console.log('MP:', text); window.parent.postMessage({ type: 'stdout', stdout: text + '\n' }, '*'); },
+  printErr: function(text) { console.error('MP ERR:', text); window.parent.postMessage({ type: 'stderr', stderr: text + '\n' }, '*'); },
+  onRuntimeInitialized: function() {
+    document.getElementById('loading').style.display = 'none';
+  },
+  onAbort: function(msg) {
+    console.error('WASM abort:', msg);
+    window.parent.postMessage({ type: 'stderr', stderr: 'WASM abort: ' + msg }, '*');
+  }
+};
+</script>
+<script src="micropython.js"></script>
+<script>
+// MicroPython sleep needs this for browser async sleep support
+window.do_sleep_with_intr = function(ms, cb) { setTimeout(function() { cb(0); }, ms); };
+
+var mp_js_stdout = window.parent;
+var mp_exec_queue = [];
+var mp_exec_busy = false;
+var mp_render_timer = null;
+
+// The parent sends code character by character through process_char
+window.process_char = function(code) {
+  if (typeof mp_js_process_char !== 'undefined') {
+    mp_js_process_char(code);
+  }
+};
+
+function mpEnqueue(code) {
+  mp_exec_queue.push(code);
+  mpExecNext();
+}
+
+async function mpExecNext() {
+  if (mp_exec_busy || mp_exec_queue.length === 0) return;
+  mp_exec_busy = true;
+  var code = mp_exec_queue.shift();
+  try {
+    await mp_js_do_str(code);
+  } catch(e) {
+    window.parent.postMessage({ type: 'stderr', stderr: String(e) }, '*');
+  }
+  mp_exec_busy = false;
+  mpExecNext();
+}
+
+window.addEventListener('message', function(ev) {
+  if (ev.data && ev.data.execute && typeof mp_js_do_str !== 'undefined') {
+    mpEnqueue(ev.data.execute);
+  }
+});
+
+// Micropython.js expects this function to be defined globally
+window.startRunning = function() {
+  document.getElementById('loading').style.display = 'none';
+  var checkReady = setInterval(function() {
+    if (typeof mp_js_init !== 'undefined' && Module && Module.asm) {
+      clearInterval(checkReady);
+      startKnobSimulator();
+    }
+  }, 500);
+};
+
+function startKnobSimulator() {
+  mp_js_init(1024 * 1024);
+  mp_js_init_repl();
+
+  // Emscripten overwrites our Module, so set canvas again
+  Module.canvas = document.getElementById('canvas');
+  Module.SDL2 = {};
+
+  // Capture MicroPython stdout from LVGL
+  window.top.addEventListener('micropython-print', function(e) {
+    var text = new TextDecoder().decode(new Uint8Array(e.detail));
+    window.parent.postMessage({ type: 'stdout', stdout: text }, '*');
+  });
+
+  // Create SDL display (no widgets — editor code handles those)
+  mp_js_do_str(
+    'import lvgl as lv\nlv.init()\ndisp = lv.sdl_window_create(480, 320)\nlv.sdl_window_set_title(disp, "Knob Simulator")\ndef on_touch(x, y, pressed):\n    pass\nprint("Ready")'
+  ).then(function() {
+    window.parent.postMessage({ type: 'mp_ready' }, '*');
+    // Drive LVGL rendering periodically (queued to avoid async conflicts)
+    mp_render_timer = setInterval(function() {
+      if (typeof mp_js_do_str !== 'undefined') {
+        mpEnqueue('lv.timer_handler()');
+      }
+    }, 16);
+  });
+}
+
+  // Handle touch/drag on canvas — feed into MicroPython arc widget directly
+  (function() {
+    var canvas = document.getElementById('canvas');
+    var dragging = false;
+    var lastVal = -1;
+    var pendingTouch = null;
+    function sendTouch() {
+      if (pendingTouch === null) return;
+      var p = pendingTouch;
+      pendingTouch = null;
+      var r = canvas.getBoundingClientRect();
+      var x = Math.round(p.clientX - r.left);
+      var y = Math.round(p.clientY - r.top);
+      var val = p.val;
+      mpEnqueue('on_touch(' + x + ', ' + y + ', ' + p.pressed + ')');
+    }
+    function handleEvent(e, pressed) {
+      var r = canvas.getBoundingClientRect();
+      var x = e.clientX - r.left;
+      var y = e.clientY - r.top;
+      if (typeof lastX === 'undefined') lastX = -1;
+      if (typeof lastY === 'undefined') lastY = -1;
+      var dx = x - lastX;
+      var dy = y - lastY;
+      if (dx * dx + dy * dy < 4 && pressed === !!dragging) return;
+      lastX = x;
+      lastY = y;
+      pendingTouch = { clientX: e.clientX, clientY: e.clientY, pressed: pressed ? 1 : 0 };
+      setTimeout(sendTouch, 10);
+    }
+    canvas.addEventListener('mousedown', function(e) {
+      dragging = true;
+      handleEvent(e, true);
+    });
+    canvas.addEventListener('mousemove', function(e) {
+      if (dragging) handleEvent(e, true);
+    });
+    canvas.addEventListener('mouseup', function(e) {
+      dragging = false;
+      handleEvent(e, false);
+    });
+    canvas.addEventListener('mouseleave', function(e) {
+      if (dragging) {
+        dragging = false;
+        handleEvent(e, false);
+      }
+    });
+  })();
+</script>
+</body>
+</html>

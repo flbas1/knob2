@@ -1,0 +1,24 @@
+menu "Knob Control Settings"
+    config KNOB_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            Empty string = USB-HID-only mode (no WiFi, no WebSocket).
+
+    config KNOB_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        depends on KNOB_WIFI_SSID
+
+    config KNOB_WEBSOCKET_URI
+        string "WebSocket URI"
+        default "ws://10.10.10.2:8765"
+
+    config KNOB_ENCODER_STEP
+        int "Encoder step size (ticks per unit)"
+        default 3
+
+    config KNOB_BACKLIGHT_DEFAULT
+        int "Default backlight brightness (0-255)"
+        default 200
+endmenu

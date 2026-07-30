@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Knob Simulator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: #16213e;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #0f3460;
+        }
+        .header h1 { font-size: 18px; color: #e94560; }
+        .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+        .status-dot.connected { background: #4caf50; }
+        .main { flex: 1; display: flex; overflow: hidden; }
+        .sim-panel {
+            flex: 1; display: flex; flex-direction: column;
+            align-items: center; padding: 20px; overflow-y: auto;
+        }
+        .sim-frame {
+            width: 360px; height: 360px; border-radius: 50%;
+            overflow: hidden; border: 3px solid #e94560;
+            background: #000; position: relative;
+        }
+        #mp-frame { width: 100%; height: 100%; border: none; }
+        .side-panel {
+            width: 380px; background: #16213e;
+            border-left: 1px solid #0f3460;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .panel-section { padding: 15px; border-bottom: 1px solid #0f3460; }
+        .panel-section h3 { font-size: 12px; color: #e94560; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        .encoder-controls { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+        .knob-visual {
+            width: 120px; height: 120px; border-radius: 50%;
+            background: linear-gradient(145deg, #2a2a4a, #1a1a2e);
+            border: 3px solid #e94560; position: relative; cursor: grab;
+            user-select: none; transition: border-color 0.15s;
+        }
+        .knob-visual::after {
+            content: ''; position: absolute; top: 10px; left: 50%;
+            transform: translateX(-50%); width: 4px; height: 20px;
+            background: #e94560; border-radius: 2px;
+        }
+        .knob-visual:active { cursor: grabbing; border-color: #ff6b81; }
+        .encoder-btns { display: flex; gap: 10px; }
+        .enc-btn {
+            padding: 8px 16px; border: 1px solid #0f3460; background: #1a1a2e;
+            color: #e0e0e0; border-radius: 6px; cursor: pointer; font-size: 14px;
+            user-select: none; transition: background 0.15s;
+        }
+        .enc-btn:hover { background: #0f3460; }
+        .enc-btn:active { background: #e94560; }
+        .btn-press {
+            width: 100%; padding: 10px; border: 2px solid #e94560;
+            background: #1a1a2e; color: #e94560; border-radius: 6px;
+            cursor: pointer; font-size: 14px; font-weight: bold;
+            transition: background 0.15s;
+        }
+        .btn-press:active { background: #e94560; color: white; }
+        .code-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .code-editor textarea {
+            flex: 1; background: #0d1117; color: #c9d1d9; border: none;
+            padding: 10px; font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px; resize: none; outline: none; tab-size: 4;
+        }
+        .code-toolbar {
+            display: flex; gap: 5px; padding: 8px 15px;
+            background: #0d1117; border-top: 1px solid #30363d;
+        }
+        .code-toolbar button {
+            padding: 6px 12px; border: 1px solid #30363d; background: #21262d;
+            color: #c9d1d9; border-radius: 4px; cursor: pointer; font-size: 12px;
+        }
+        .code-toolbar button:hover { background: #30363d; }
+        .code-toolbar button.primary { background: #e94560; border-color: #e94560; color: white; }
+        .console {
+            height: 160px; background: #0d1117; border-top: 1px solid #30363d;
+            overflow-y: auto; padding: 8px 15px;
+            font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; color: #8b949e;
+        }
+        .console .log { color: #8b949e; }
+        .console .error { color: #f85149; }
+        .console .info { color: #58a6ff; }
+        .console .ok { color: #3fb950; }
+        .ws-log {
+            max-height: 100px; overflow-y: auto; font-family: monospace;
+            font-size: 11px; background: #0d1117; padding: 8px; border-radius: 4px;
+        }
+        .ws-log .sent { color: #3fb950; }
+        .ws-log .recv { color: #58a6ff; }
+        .help-text { font-size: 11px; color: #666; margin-top: 8px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Smart Knob Simulator</h1>
+        <div class="status">
+            <div class="status-dot" id="ws-status"></div>
+            <span id="ws-status-text">Disconnected</span>
+            <span style="margin-left:10px;color:#444">|</span>
+            <span id="mp-status" style="margin-left:10px;color:#666">MicroPython: Not loaded</span>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="sim-panel">
+            <div class="sim-frame" id="sim-frame">
+                <iframe id="mp-frame" src="static/lvgl.html?v=3"></iframe>
+            </div>
+            <p class="help-text">Click display to touch · Arrow keys to rotate encoder · Ctrl+Enter to run code</p>
+        </div>
+
+        <div class="side-panel">
+            <div class="panel-section">
+                <h3>Encoder</h3>
+                <div class="encoder-controls">
+                    <div class="knob-visual" id="knob-visual"></div>
+                    <div class="encoder-btns">
+                        <button class="enc-btn" id="btn-ccw">◀ CCW</button>
+                        <button class="enc-btn" id="btn-cw">CW ▶</button>
+                    </div>
+                    <button class="btn-press" id="btn-press">BUTTON</button>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>WebSocket Log</h3>
+                <div class="ws-log" id="ws-log"></div>
+            </div>
+
+            <div class="code-editor">
+                <div class="code-toolbar">
+                    <button class="primary" id="btn-run">▶ Run</button>
+                    <button id="btn-stop">⏹ Stop</button>
+                    <button id="btn-clear-log">Clear Log</button>
+                    <button id="btn-load-fs">Load from fs1/</button>
+                </div>
+                <textarea id="code-editor" spellcheck="false" placeholder="# Write MicroPython + LVGL code here..."></textarea>
+            </div>
+
+            <div class="console" id="console"></div>
+        </div>
+    </div>
+
+<script>
+// =============================================
+// Smart Knob Simulator
+// =============================================
+
+const WS_URL = `ws://${location.hostname || 'localhost'}:8765`;
+let ws = null;
+let wsConnected = false;
+let mpReady = false;
+let encoderRot = 0;
+
+const $ = id => document.getElementById(id);
+const consoleEl = $('console');
+const wsLog = $('ws-log');
+const codeEditor = $('code-editor');
+const knobVisual = $('knob-visual');
+// touch overlay removed
+
+// =============================================
+// Logging
+// =============================================
+
+function log(msg, cls = 'log') {
+    const t = new Date().toLocaleTimeString();
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = `[${t}] ${msg}`;
+    consoleEl.appendChild(d);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function logWs(dir, data) {
+    const t = new Date().toLocaleTimeString();
+    const d = document.createElement('div');
+    d.className = dir;
+    const s = JSON.stringify(data);
+    d.textContent = `[${t}] ${dir === 'sent' ? '>>>' : '<<<'} ${s.length > 80 ? s.slice(0, 80) + '...' : s}`;
+    wsLog.appendChild(d);
+    wsLog.scrollTop = wsLog.scrollHeight;
+}
+
+// =============================================
+// WebSocket Bridge Connection
+// =============================================
+
+function connectWs() {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        wsConnected = true;
+        $('ws-status').classList.add('connected');
+        $('ws-status-text').textContent = 'Connected to bridge';
+        log('WebSocket connected to bridge', 'ok');
+        ws.send(JSON.stringify({ sender: 'browser', type: 'ready' }));
+    };
+
+    ws.onmessage = (ev) => {
+        try {
+            const msg = JSON.parse(ev.data);
+            logWs('recv', msg);
+            handleWsMsg(msg);
+        } catch (e) {
+            log(`WS parse error: ${e}`, 'error');
+        }
+    };
+
+    ws.onclose = () => {
+        wsConnected = false;
+        $('ws-status').classList.remove('connected');
+        $('ws-status-text').textContent = 'Disconnected';
+        log('WebSocket disconnected — retrying in 3s...', 'error');
+        setTimeout(connectWs, 3000);
+    };
+
+    ws.onerror = () => log('WebSocket error', 'error');
+}
+
+function wsSend(data) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+        logWs('sent', data);
+    }
+}
+
+function handleWsMsg(msg) {
+    if (msg.type === 'data_update') {
+        log(`Data update: ${msg.app} = ${JSON.stringify(msg.data)}`, 'info');
+        runInSimulator(`
+import json
+try:
+    on_data_update(json.loads('${JSON.stringify(msg.data)}'))
+except NameError:
+    pass
+except Exception as e:
+    print(f"on_data_update error: {e}")
+`);
+    }
+}
+
+// =============================================
+// MicroPython WASM Integration
+// =============================================
+
+const mpFrame = $('mp-frame');
+
+function runInSimulator(code) {
+    if (mpFrame && mpFrame.contentWindow) {
+        mpFrame.contentWindow.postMessage({ execute: code }, '*');
+        log('Code sent to simulator', 'info');
+    } else {
+        log('Simulator iframe not ready', 'error');
+    }
+}
+
+// Listen for messages from the MicroPython iframe
+window.addEventListener('message', (ev) => {
+    if (ev.data && ev.data.type === 'mp_ready') {
+        mpReady = true;
+        $('mp-status').textContent = 'MicroPython: Ready';
+        $('mp-status').style.color = '#4caf50';
+        log('MicroPython WASM loaded', 'ok');
+        loadDefaultCode();
+    }
+    if (ev.data && ev.data.stdout) {
+        log(`MP: ${ev.data.stdout}`, 'info');
+    }
+    if (ev.data && ev.data.stderr) {
+        log(`MP ERR: ${ev.data.stderr}`, 'error');
+    }
+
+});
+
+function loadDefaultCode() {
+    codeEditor.value = `s = lv.screen_active()
+s.set_style_bg_color(lv.color_hex(0x000000), 0)
+
+title = lv.label(s)
+title.set_text("Smart Knob")
+title.set_style_text_color(lv.color_hex(0xffffff), 0)
+title.set_style_text_font(lv.font_montserrat_16, 0)
+title.align(lv.ALIGN.TOP_MID, 0, 30)
+
+arc = lv.arc(s)
+arc.set_size(200, 200)
+arc.align(lv.ALIGN.CENTER, 0, 0)
+arc.set_range(0, 100)
+arc.set_value(50)
+arc.set_start_angle(135)
+arc.set_end_angle(405)
+arc.set_style_arc_color(lv.color_hex(0x007AFF), lv.PART.INDICATOR)
+arc.set_style_arc_width(10, lv.PART.INDICATOR)
+arc.set_style_arc_color(lv.color_hex(0x333333), lv.PART.MAIN)
+arc.set_style_arc_width(10, lv.PART.MAIN)
+
+val = lv.label(arc)
+val.set_text("50%")
+val.set_style_text_color(lv.color_hex(0xffffff), 0)
+val.set_style_text_font(lv.font_montserrat_14, 0)
+val.align(lv.ALIGN.CENTER, 0, 0)
+
+status = lv.label(s)
+status.set_text("Rotate knob to adjust")
+status.set_style_text_color(lv.color_hex(0x666666), 0)
+status.set_style_text_font(lv.font_montserrat_14, 0)
+status.align(lv.ALIGN.BOTTOM_MID, 0, -30)
+
+def on_encoder(delta):
+    v = arc.get_value() + delta
+    v = max(0, min(100, v))
+    arc.set_value(v)
+    val.set_text(str(v) + "%")
+
+def on_button():
+    pass
+
+def on_data_update(data):
+    pass
+
+_touch_val = None
+_touch_bg_start = None
+_touch_bg_end = None
+def on_touch(x, y, pressed):
+    global _touch_val, _touch_bg_start, _touch_bg_end
+    if not pressed:
+        _touch_val = None
+        return
+    import math
+    if _touch_bg_start is None:
+        _touch_bg_start = arc.get_bg_angle_start()
+        _touch_bg_end = arc.get_bg_angle_end()
+        print("arc bg_angles:", _touch_bg_start, _touch_bg_end)
+    cx, cy = 180, 180
+    dx = x - cx
+    dy = y - cy
+    angle = math.atan2(dy, dx) * 180 / math.pi
+    angle = (angle + 360) % 360
+    a_start = _touch_bg_start
+    a_end = _touch_bg_end
+    if a_start < a_end:
+        if angle < a_start or angle > a_end:
+            v = 0 if angle <= (a_start + a_end) // 2 else 100
+        else:
+            v = round((angle - a_start) / (a_end - a_start) * 100)
+    else:
+        # wrap around (e.g., 270 to 90)
+        if angle < a_start and angle > a_end:
+            v = 0 if angle <= (a_start + 360 + a_end) // 2 % 360 else 100
+        else:
+            if angle >= a_start:
+                v = round((angle - a_start) / (360 + a_end - a_start) * 100)
+            else:
+                v = round((angle + 360 - a_start) / (360 + a_end - a_start) * 100)
+    if v != _touch_val:
+        _touch_val = v
+        arc.set_value(v)
+        val.set_text(str(v) + "%")
+
+print("Ready")
+`;
+}
+
+// =============================================
+// Encoder Events
+// =============================================
+
+function sendEncoder(direction, delta = 1) {
+    log(`Encoder: ${direction}`, 'info');
+    wsSend({ sender: 'browser', type: 'encoder', direction, delta });
+
+    const sign = direction === 'cw' ? delta : -delta;
+    runInSimulator(`
+try:
+    on_encoder(${sign})
+except NameError:
+    pass
+except Exception as e:
+    print(f"on_encoder error: {e}")
+`);
+}
+
+function sendButton() {
+    log('Button: pressed', 'info');
+    wsSend({ sender: 'browser', type: 'button' });
+    runInSimulator(`
+try:
+    on_button()
+except NameError:
+    pass
+except Exception as e:
+    print(f"on_button error: {e}")
+`);
+}
+
+// Knob rotation via drag
+let dragging = false, lastAngle = 0;
+
+knobVisual.addEventListener('mousedown', (e) => {
+    dragging = true;
+    const r = knobVisual.getBoundingClientRect();
+    lastAngle = Math.atan2(e.clientY - r.top - 60, e.clientX - r.left - 60);
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const r = knobVisual.getBoundingClientRect();
+    const angle = Math.atan2(e.clientY - r.top - 60, e.clientX - r.left - 60);
+    let delta = angle - lastAngle;
+    if (delta > Math.PI) delta -= 2 * Math.PI;
+    if (delta < -Math.PI) delta += 2 * Math.PI;
+
+    if (Math.abs(delta) > 0.15) {
+        const steps = Math.round(delta / 0.15);
+        encoderRot += steps;
+        knobVisual.style.transform = `rotate(${encoderRot * 15}deg)`;
+        sendEncoder(steps > 0 ? 'cw' : 'ccw', Math.abs(steps));
+        lastAngle = angle;
+    }
+});
+
+document.addEventListener('mouseup', () => { dragging = false; });
+
+// Button controls
+$('btn-cw').addEventListener('click', () => {
+    encoderRot++;
+    knobVisual.style.transform = `rotate(${encoderRot * 15}deg)`;
+    sendEncoder('cw');
+});
+
+$('btn-ccw').addEventListener('click', () => {
+    encoderRot--;
+    knobVisual.style.transform = `rotate(${encoderRot * 15}deg)`;
+    sendEncoder('ccw');
+});
+
+$('btn-press').addEventListener('click', sendButton);
+
+
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'TEXTAREA') return;
+
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        encoderRot++;
+        knobVisual.style.transform = `rotate(${encoderRot * 15}deg)`;
+        sendEncoder('cw');
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        encoderRot--;
+        knobVisual.style.transform = `rotate(${encoderRot * 15}deg)`;
+        sendEncoder('ccw');
+    } else if (e.key === 'Enter' && e.ctrlKey) {
+        e.preventDefault();
+        $('btn-run').click();
+    }
+});
+
+// Code editor controls
+$('btn-run').addEventListener('click', () => {
+    const code = codeEditor.value;
+    if (code.trim()) {
+        log('Running code...', 'info');
+        runInSimulator(code);
+    }
+});
+
+$('btn-stop').addEventListener('click', () => {
+    log('Stopping...', 'info');
+    runInSimulator('import sys; sys.exit()');
+});
+
+$('btn-clear-log').addEventListener('click', () => {
+    consoleEl.innerHTML = '';
+    wsLog.innerHTML = '';
+});
+
+$('btn-load-fs').addEventListener('click', () => {
+    log('Load from fs1/ — use the code editor to paste plugin code', 'info');
+});
+
+// =============================================
+// Init
+// =============================================
+
+connectWs();
+log('Smart Knob Simulator initialized', 'ok');
+log('Arrow keys or drag knob = rotate encoder', 'log');
+log('Ctrl+Enter = run code', 'log');
+</script>
+</body>
+</html>

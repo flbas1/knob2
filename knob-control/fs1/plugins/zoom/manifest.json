@@ -1,0 +1,12 @@
+{
+    "name": "Zoom",
+    "id": "zoom",
+    "version": "1.0.0",
+    "entry": "plugin.py",
+    "icon": "zoom",
+    "icon_anim": "none",
+    "haptic_feedback": true,
+    "settings": {
+        "sensitivity": {"type": "int", "default": 3, "min": 1, "max": 10}
+    }
+}

@@ -1,0 +1,11 @@
+{
+    "name": "Work Laptop",
+    "platform": "windows",
+    "machine_id": "auto",
+    "plugins": ["volume", "zoom", "scroll"],
+    "settings": {
+        "volume_sensitivity": 3,
+        "scroll_sensitivity": 1,
+        "screen_brightness": 150
+    }
+}
