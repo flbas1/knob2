@@ -1,0 +1,7 @@
+info: INFO: Symbol IDF_TARGET_LINUX defined in multiple locations (see below). Please check if this is a correct behavior or a random name match:
+    /workspaces/knob-controller/esp-idf/Kconfig:78
+    /workspaces/knob-controller/esp-idf/Kconfig:162
+info: Choice ESPTOOLPY_FLASHSIZE has multiple active selections. The last one will be used: ESPTOOLPY_FLASHSIZE_16MB .
+info: Choice PARTITION_TABLE_TYPE has multiple active selections. The last one will be used: PARTITION_TABLE_CUSTOM .
+Including User C Module(s) from /workspaces/knob-controller/lv_micropython/user_modules/lv_binding_micropython/micropython.cmake
+Found User C Module(s): usermod_lvgl, lvgl_interface
