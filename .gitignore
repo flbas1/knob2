@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+**/genhdr/qstr.i.last
+**/build-WAVESHARE_ESP32_S3_KNOB/
+**/build_knob/
+**/build_test/
