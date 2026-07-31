@@ -5,3 +5,4 @@ __pycache__/
 **/build-WAVESHARE_ESP32_S3_KNOB/
 **/build_knob/
 **/build_test/
+hardware/
