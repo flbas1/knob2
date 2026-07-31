@@ -10,7 +10,7 @@ WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MACHINES_DIR = os.path.join(SCRIPT_DIR, 'machines')
 BOOTSTRAP_PATH = os.path.join(SCRIPT_DIR, 'bootstrap.py')
-LAUNCHER_PATH = os.path.join(SCRIPT_DIR, 'launcher.py')
+LAUNCHER_PATH = os.path.join(SCRIPT_DIR, 'fs1', 'launcher.py')
 
 sys.path.insert(0, os.path.join(SCRIPT_DIR, 'fs1', 'pc'))
 from knob_client.main import KnobClient
