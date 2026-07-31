@@ -3,73 +3,85 @@ Shared protocol definitions for Smart Knob Controller.
 
 Message types and format constants used by both knob firmware
 and PC/iOS/Android clients.
+
+Protocol (server-driven bootstrap):
+    execute  (server → knob)  run MicroPython code
+    config   (server → knob)  machine config
+    bootstrap_response (knob → server)  identity after bootstrap
+    config_ack (knob → server)  config accepted
+    launcher_ready (knob → server)  launcher UI live
+    app_selected (knob → server)  user picked an app
+    action   (knob → server)  app command (volume, brightness, zoom, scroll)
+    data_update (either)  app-specific state push
+    data_request (knob → server)  request current state
 """
 
-# Message types (knob → PC)
-MSG_DISCOVER = "discover"
-MSG_PLUGIN_INPUT = "plugin_input"
-MSG_APP_SWITCH = "app_switch"
+# Message types (server → knob)
+MSG_EXECUTE = "execute"
+MSG_CONFIG = "config"
+
+# Message types (knob → server)
+MSG_BOOTSTRAP_RESPONSE = "bootstrap_response"
+MSG_CONFIG_ACK = "config_ack"
+MSG_LAUNCHER_READY = "launcher_ready"
+MSG_APP_SELECTED = "app_selected"
+MSG_ACTION = "action"
 MSG_DATA_REQUEST = "data_request"
 
-# Message types (PC → knob)
-MSG_IDENTIFY = "identify"
+# Message types (either direction)
 MSG_DATA_UPDATE = "data_update"
-MSG_STATE_UPDATE = "state_update"
 
 
-def make_discover():
-    """Knob sends this on connection."""
-    return {"type": MSG_DISCOVER}
+def make_execute(code, machines=None):
+    """Server sends MicroPython code for the knob to run.
+
+    `machines` is an optional list of {guid, name, location} dicts
+    used by the simulator to populate its Machine dropdown.
+    """
+    msg = {"type": MSG_EXECUTE, "code": code}
+    if machines is not None:
+        msg["machines"] = machines
+    return msg
 
 
-def make_identify(device, platform, version="1.0.0"):
-    """PC responds with this to identify itself."""
-    return {
-        "type": MSG_IDENTIFY,
-        "device": device,
-        "platform": platform,
-        "version": version
-    }
+def make_config(config):
+    """Server sends the matched machine config."""
+    return {"type": MSG_CONFIG, "config": config}
 
 
-def make_plugin_input(app, action, value):
-    """Knob sends this when user interacts with a plugin."""
-    return {
-        "type": MSG_PLUGIN_INPUT,
-        "app": app,
-        "action": action,
-        "value": value
-    }
+def make_bootstrap_response(info):
+    """Knob reports its identity after running bootstrap.py.
+
+    `info` carries at minimum `machine_guid` (and `machine` name).
+    """
+    return {"type": MSG_BOOTSTRAP_RESPONSE, "data": info}
+
+
+def make_config_ack(status="ok"):
+    """Knob acknowledges the config was accepted."""
+    return {"type": MSG_CONFIG_ACK, "status": status}
+
+
+def make_launcher_ready(apps):
+    """Knob announces the launcher UI is live with its app list."""
+    return {"type": MSG_LAUNCHER_READY, "apps": apps}
+
+
+def make_app_selected(app):
+    """Knob sends this when the user selects an app."""
+    return {"type": MSG_APP_SELECTED, "app": app}
+
+
+def make_action(app, cmd, value=None):
+    """Knob sends an app command (volume up, brightness set, scroll, zoom)."""
+    return {"type": MSG_ACTION, "app": app, "cmd": cmd, "value": value}
 
 
 def make_data_update(app, data):
-    """PC sends this to update knob display with new data."""
-    return {
-        "type": MSG_DATA_UPDATE,
-        "app": app,
-        "data": data
-    }
-
-
-def make_app_switch(app):
-    """Knob sends this when user switches apps."""
-    return {
-        "type": MSG_APP_SWITCH,
-        "app": app
-    }
-
-
-def make_state_update(state):
-    """PC sends this to update knob state."""
-    return {
-        "type": MSG_STATE_UPDATE,
-        "state": state
-    }
+    """Server (or knob) pushes app-specific state."""
+    return {"type": MSG_DATA_UPDATE, "app": app, "data": data}
 
 
 def make_data_request(app):
-    """Knob sends this to request data from PC for an app."""
-    return {
-        "type": MSG_DATA_REQUEST,
-        "app": app
-    }
+    """Knob requests current state from the server for an app."""
+    return {"type": MSG_DATA_REQUEST, "app": app}

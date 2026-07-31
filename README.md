@@ -2,63 +2,136 @@
 
 A portable smart knob that adapts to whatever computer it's plugged into.
 
-The knob is the host. The PC is a client. You take the knob from home to work, and it automatically loads the right configuration.
+The **knob is the host** — it controls the PC. The **PC is the client** — it gets its commands from the knob. Take the knob from home to work and it automatically loads the right configuration for wherever it lands.
+
+It's a very symbiotic relationship: the knob runs the UI and drives the whole experience, while the PC serves it the code and configs it needs, feeds it data (music, lights, weather), and executes platform actions (volume, brightness, zoom, scroll) on its behalf.
+
+## Repository Layout
+
+```
+.
+├── fs1/        Knob-side Python + JSON — code the server serves to the knob
+├── fs2/        Firmware build code — MicroPython + LVGL + ESP-IDF
+├── hardware/   Third-party SDKs + hardware notes (git-ignored)
+└── README.md
+```
+
+| Folder | Contents | Git |
+|--------|----------|-----|
+| `fs1/` | `server.py`, `bootstrap.py`, `launcher.py`, machine configs, platform handlers, test simulator, mobile client shells | tracked |
+| `fs2/` | Firmware: `boot.py`, `main.py`, frozen drivers (`lib/`), ESP-IDF project, partition table | tracked |
+| `hardware/` | ESP-IDF SDK, lv_micropython build, CrowPanel reference SDK, notes | **ignored** |
 
 ## Architecture
 
+The PC runs a small server (`fs1/server.py`) that drives a **bootstrap protocol** over WebSocket:
+
+1. It serves `bootstrap.py` to the knob, which probes its identity and reports a machine GUID.
+2. The server matches that GUID against a config in `fs1/machines/{machine_guid}.json`.
+3. It sends the config, then serves `launcher.py`, which builds the app-launcher UI on the knob.
+4. From then on the **knob drives**: app selections and commands (volume up, brightness set, scroll, zoom) flow to the PC, which executes them via `KnobClient` platform handlers.
+
 ```
-┌──────────────────────────────────────┐
-│           THE KNOB (Host)            │
-│                                      │
-│  FS1 (FAT32, user-accessible):      │
-│  ┌────────────────────────────────┐  │
-│  │ machines/                      │  │
-│  │   ├─ home.json                 │  │
-│  │   ├─ work.json                 │  │
-│  │   └─ laptop.json               │  │
-│  │ plugins/                       │  │
-│  │   └─ timer.py                  │  │
-│  │ pc/                            │  │
-│  │   └─ knob_client/              │  │
-│  │ iphone/KnobApp/                │  │
-│  │ android/KnobApp/               │  │
-│  │ settings.json                  │  │
-│  └────────────────────────────────┘  │
-│                                      │
-│  FS2 (ESP-IDF firmware, internal):  │
-│  ┌────────────────────────────────┐  │
-│  │ main/                          │  │
-│  │   ├─ main.c        (boot+loop)│  │
-│  │   ├─ hardware_init.c (I2C,touch│  │
-│  │   │   encoder,haptic)         │  │
-│  │   ├─ app_manager.c  (app switch)│  │
-│  │   ├─ hid.c          (USB HID) │  │
-│  │   ├─ knob_ui.c      (LVGL UI) │  │
-│  │   ├─ websocket_client.c       │  │
-│  │   └─ pins.h (Waveshare GPIO)  │  │
-│  └────────────────────────────────┘  │
-│                                      │
-│  Input: EC11 rotary encoder + CST816 │
-│  Output: SH8601 AMOLED QSPI 360x360│
-│  Haptic: DRV2605 LRA               │
-│  HID: USB TinyUSB (knob IS keyboard)│
-└────────────┬─────────────────────────┘
-             │ USB CDC-Ether / WiFi
-             ▼
-┌──────────────────────────────────────┐
-│        PC (Client - lightweight)     │
-│                                      │
-│  - Discovers knob via USB/WiFi       │
-│  - Provides optional data:           │
-│    * Music info (Spotify/playerctl)  │
-│    * HA lights (REST API)            │
-│    * Weather (Open-Meteo)            │
-│  - Executes HID from knob            │
-│                                      │
-│  No apps run on the PC.              │
-│  The knob tells the PC what to do.   │
-└──────────────────────────────────────┘
+┌─────────────────────┐           ┌──────────────────────────────────┐
+│   THE KNOB (host)   │           │      PC SERVER (server.py)       │
+│                     │           │                                  │
+│  MicroPython + LVGL │           │  Bootstrap protocol:             │
+│  ├─ bootstrap.py*   │  WS :8765 │  1. Serve bootstrap.py → knob    │
+│  ├─ launcher.py*    │◄────────►│  2. Knob reports machine GUID     │
+│  ├─ plugin_*.py*    │           │  3. Match config → send config   │
+│                     │           │  4. Knob acks → serve launcher   │
+│  *served by server  │           │                                  │
+│                     │           │  Command routing:                │
+│                     │           │  volume, brightness, scroll, zoom│
+│                     │           │  → KnobClient platform handlers  │
+└─────────────────────┘           └──────────────────────────────────┘
 ```
+
+### Bootstrap Flow
+
+```
+server.py                          Knob (physical or sim)
+   │                                      │
+   │  ── Step 1 ──                        │
+   │  {"type":"execute","code":"<boot>"}  │
+   │─────────────────────────────────────►│
+   │                                      │  Runs bootstrap.py
+   │  {"type":"bootstrap_response",       │  reports identity
+   │    "data":{"machine_guid":"..."}}    │
+   │◄─────────────────────────────────────│
+   │                                      │
+   │  ── Step 2 ──                        │
+   │  Match GUID → machine config         │
+   │  (literal GUID match, no globs)      │
+   │                                      │
+   │  {"type":"config","config":{...}}    │
+   │─────────────────────────────────────►│
+   │                                      │  Stores config
+   │  {"type":"config_ack","status":"ok"} │
+   │◄─────────────────────────────────────│
+   │                                      │
+   │  ── Step 3 ──                        │
+   │  {"type":"execute","code":"<launch>"}│
+   │─────────────────────────────────────►│
+   │                                      │  Builds app launcher
+   │  {"type":"launcher_ready",           │
+   │    "apps":[{"id":"volume",...}]}     │
+   │◄─────────────────────────────────────│
+   │                                      │
+   │  ── Interaction ──                   │
+   │  {"type":"app_selected","app":"vol"} │
+   │◄─────────────────────────────────────│
+   │  {"type":"action",                   │
+   │    "app":"volume","cmd":"set",       │
+   │    "value":42}                       │
+   │─────────────────────────────────────►│
+```
+
+The server injects the machine list into bootstrap code as `_AVAILABLE_MACHINES`, and the `execute` message carries a `machines` array so the simulator can populate its Machine dropdown.
+
+### Development Simulator
+
+```
+Browser ──WS :8766──► testKnob.py ──WS :8765──► server.py
+                        (pipe)
+```
+
+`fs1/test-env/testKnob.py` is a **transparent bridge** — it serves the simulator UI (HTTP :8080) and pipes every WebSocket message between the browser and `server.py` unmodified. Zero logic. A browser knob runs the exact same bootstrap → config → launcher flow as the physical device.
+
+## Protocol
+
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `execute` | Server → Knob | Run MicroPython code (includes `machines` array for sim dropdown) |
+| `bootstrap_response` | Knob → Server | Identity after bootstrap |
+| `config` | Server → Knob | Machine config |
+| `config_ack` | Knob → Server | Config accepted |
+| `launcher_ready` | Knob → Server | Launcher UI live |
+| `app_selected` | Knob → Server | User picked an app |
+| `action` | Knob → Server | App command (volume up, brightness set, etc) |
+| `data_update` | Either | App-specific state push |
+| `data_request` | Knob → Server | Request current state |
+
+## Machine Configs
+
+Each machine has a config in `fs1/machines/` named after its literal GUID:
+
+```json
+{
+    "name": "Development Sim",
+    "machine_guid": "sim-dev-001",
+    "location": "Simulator",
+    "haptic": false,
+    "sound": false,
+    "backlight": 100,
+    "apps": [
+        {"id": "volume",     "name": "Volume"},
+        {"id": "brightness", "name": "Brightness"}
+    ]
+}
+```
+
+The filename is `{machine_guid}.json` (e.g. `sim-dev-001.json`). `location` describes where the machine lives (Simulator, Office, Home, …).
 
 ## Hardware
 
@@ -187,96 +260,45 @@ Dual MCU: ESP32-S3R8 (main, 16MB Flash / 8MB PSRAM) + ESP32-U4WDH (companion, 4M
 ## Transport
 
 1. **USB CDC-Ether** (primary) — knob appears as network interface, static IPs: knob `10.10.10.1`, PC `10.10.10.2`
-2. **WiFi** (fallback) — `settings.json` stores `known_networks`
+2. **WiFi** (fallback) — `fs1/settings.json` stores SSID/password; the knob opens a WebSocket to `ws://10.10.10.2:8765`
 
 ## Machine Detection
 
-When plugged into a computer:
-1. Knob identifies machine (USB descriptor, hostname, MAC)
-2. Checks `FS1/machines/<machine_id>.json`
-3. Loads plugins enabled for that machine
-4. If no config, enters setup mode on display
+When the knob connects to the server:
 
-## Per-Machine Config (`machines/<machine>.json`)
-
-```json
-{
-    "name": "Work Laptop",
-    "platform": "windows",
-    "plugins": {
-        "hid": {"enabled": true},
-        "music": {"enabled": false},
-        "ha_dimmer": {"enabled": false},
-        "weather": {"enabled": true}
-    },
-    "settings": {
-        "volume_sensitivity": 3,
-        "scroll_sensitivity": 2,
-        "screen_brightness": 150
-    }
-}
-```
-
-## Dual Filesystem
-
-| Filesystem | Format | Contents | Access |
-|-----------|--------|----------|--------|
-| **FS1** | FAT32 | Per-machine configs, plugins, PC/phone clients, settings | USB mass storage |
-| **FS2** | ESP-IDF firmware | C firmware: LVGL, HID, apps, transport | Internal only |
-
-FS1 mounts as USB drive when knob is plugged in. Edit configs in any text editor, drop plugin `.py` files into `plugins/`.
-
-## Project Structure
-
-```
-knob-control/
-├── CMakeLists.txt              # ESP-IDF project file
-├── sdkconfig.defaults          # ESP32-S3 board config (16MB flash, OPI PSRAM)
-│
-├── main/                       # ESP-IDF main component (firmware)
-│   ├── CMakeLists.txt
-│   ├── Kconfig.projbuild       # menuconfig options
-│   ├── pins.h                  # GPIO mappings for Waveshare board
-│   ├── main.c                  # Entry point + main loop
-│   ├── hardware_init.c/.h      # I2C, CST816 touch, DRV2605, encoder ISR
-│   ├── app_manager.c/.h        # App switching + input routing
-│   ├── hid.c/.h                # USB HID via TinyUSB
-│   ├── knob_ui.c/.h            # LVGL display layer
-│   └── websocket_client.c/.h   # WebSocket communication
-│
-├── fs1/                        # FS1: FAT32 (user-accessible USB drive)
-│   ├── machines/               # Per-machine configs
-│   │   ├── home.json
-│   │   └── work.json
-│   ├── plugins/                # User plugins (drop .py files here)
-│   │   └─ timer.py
-│   ├── pc/                     # PC client (Python)
-│   │   └─ knob_client/
-│   ├── iphone/KnobApp/         # iOS client (Swift)
-│   ├── android/KnobApp/        # Android client (Kotlin)
-│   └── settings.json           # Global settings + known WiFi
-│
-└── protocol/
-    └── messages.py             # Shared JSON protocol (knob ↔ clients)
-```
+1. Server serves `bootstrap.py` — the knob probes its identity (USB descriptor, hostname, MAC) and reports a machine GUID
+2. Server matches `fs1/machines/{machine_guid}.json`
+3. Server sends the matched config, then `launcher.py` — which enables the apps/plugins in that config
+4. If no config matches, the knob enters setup mode on the display
 
 ## Quick Start
 
-### Build & Flash Firmware (ESP-IDF)
+### Run the PC Server + Simulator
+
 ```bash
-cd knob-control
-idf.py set-target esp32s3
-idf.py menuconfig       # Configure WiFi credentials, HID transport, etc.
-idf.py build
-idf.py flash monitor
+cd fs1
+python3 server.py &          # Real PC server (WS :8765)
+python3 test-env/testKnob.py # Transparent bridge (HTTP :8080, WS :8766)
+# Open http://localhost:8080
 ```
 
-### PC Client (optional — music/weather/HA data)
+The full bootstrap → config → launcher flow runs transparently through the bridge. See `fs1/start.txt` for the expected WS log and simulator keyboard shortcuts.
+
+### Build & Flash Firmware
+
 ```bash
-cd fs1/pc
-pip install -e .
-knob-client  # Auto-discovers knob via USB, provides data
+cd fs2
+idf.py set-target esp32s3
+idf.py menuconfig
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+See `fs2/README.md` for details.
+
+### Mobile Clients
+
+The protocol is transport-agnostic — `fs1/android/` and `fs1/iphone/` are client shells using the same WebSocket protocol.
 
 ## FAQ
 
@@ -304,8 +326,12 @@ LVGL's pointer device steals group focus. Don't use LVGL's encoder indev — dri
 ## Building for Other Platforms
 
 The architecture supports swapping knob hardware:
-- **ESP32-S3 knob** — current, runs LVGL + TinyUSB
+- **ESP32-S3 knob** — current, runs MicroPython + LVGL
 - **40" touchscreen** — Python client with full UI, knob becomes a remote
 - **iPhone/Android** — touch dial replaces physical encoder, same WebSocket protocol
 
 The protocol stays the same. Only the transport and UI layer change.
+
+## License
+
+MIT

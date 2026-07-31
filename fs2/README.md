@@ -1,173 +1,71 @@
-# Smart Knob Controller
+# fs2 — Knob Firmware Build
 
-A portable smart knob with a PC server that adapts to whatever computer it's plugged into. The **PC is the server** — it runs the bootstrap protocol, identifies the knob, sends the right config, and routes app commands (volume, brightness, zoom, scroll) to system services.
+This folder holds the code to **build the knob** — MicroPython + LVGL firmware for the Waveshare ESP32-S3-Knob-Touch-LCD-1.8.
 
-## Architecture
+The knob is the **host**: it runs this firmware, controls the PC, and gets its commands executed by the PC's server (`../fs1/server.py`). This firmware is the brain of the whole system.
 
-```
-┌─────────────────────┐           ┌──────────────────────────────────┐
-│   THE KNOB          │           │      PC SERVER (server.py)       │
-│                     │           │                                  │
-│  MicroPython + LVGL │           │  Bootstrap protocol:             │
-│  ├─ bootstrap.py*   │  WS :8765 │  1. Send bootstrap.py → knob    │
-│  ├─ launcher.py*    │◄────────►│  2. Knob responds with GUID      │
-│  ├─ plugin_*.py*    │           │  3. Match config → send config   │
-│                     │           │  4. Knob acks → send launcher.py │
-│  *sent by server    │           │                                  │
-│                     │           │  Command routing:                │
-│                     │           │  volume, brightness, scroll, zoom│
-│                     │           │  → KnobClient platform handlers  │
-└─────────────────────┘           └──────────────────────────────────┘
-                                           │
-                                           │ WS :8766
-                                           ▼
-                                 ┌─────────────────────┐
-                                 │  testKnob.py         │
-                                 │  (test bridge only)  │
-                                 │  HTTP :8080 + pipe   │
-                                 │                      │
-                                 │  Serves index.html   │
-                                 │  Forwards WS raw     │
-                                 │  No logic at all     │
-                                 └─────────────────────┘
-                                           │
-                                           ▼
-                                 ┌─────────────────────┐
-                                 │  Browser Simulator   │
-                                 │  (if needed)         │
-                                 └─────────────────────┘
-```
+| Folder | Contains |
+|--------|----------|
+| `fs1/` | Python + JSON the server serves to the knob at runtime (bootstrap, configs, launcher) |
+| `fs2/` | **This folder — firmware build code** |
+| `hardware/` | Third-party SDKs the build depends on (esp-idf, lv_micropython) |
 
-### Two-Server Model
+## What's in here
 
-| Server | Port | Role |
-|--------|------|------|
-| `server.py` | 8765 (WS) | **Real PC server** — bootstrap flow, machine configs, command dictionary, platform actions |
-| `testKnob.py` | 8080 (HTTP) + 8766 (WS) | **Test bridge only** — serves browser sim, pipes WS messages raw to server.py. Zero logic. |
+| Path | Purpose |
+|------|---------|
+| `main.py` | MicroPython entry point — imports `lib/`, constructs and runs `Launcher` |
+| `boot.py` | Runs before `main.py` — initializes USB HID + backlight, loads `/fs1/settings.json` |
+| `lib/` | Frozen MicroPython hardware drivers (see below) |
+| `main/` | ESP-IDF component — `pins.h` (GPIO map), `idf_component.yml` (TinyUSB, SH8601, LVGL, WS client), `Kconfig.projbuild` |
+| `CMakeLists.txt` | ESP-IDF project file (`project(knob-control)`) |
+| `sdkconfig.defaults` | Board config — 16MB QIO flash, OPI PSRAM 80MHz, LVGL fonts, FATFS, TinyUSB HID, CDC logging |
+| `partitions.csv` | `nvs`, `phy_init`, `fs1` FAT partition (3MB), factory app |
+| `protocol/messages.py` | Shared JSON message types (knob ↔ PC) |
+| `firmware/` | C-extension notes for the lv_micropython build system (see its README) |
 
-### Bootstrap Flow (server-driven)
+## Hardware Drivers (`lib/`)
+
+Frozen into the firmware — the knob's peripherals:
+
+| Module | Peripheral |
+|--------|------------|
+| `hardware.py` | Board-level init: pins, I2C, shared buses, constants |
+| `sh8601.py` | SH8601 AMOLED QSPI display (360×360) |
+| `cst816.py` | CST816 capacitive touch (I2C 0x15) |
+| `encoder.py` | Dual micro-switch rotary encoder (NOT quadrature) |
+| `drv2605.py` | DRV2605 haptic LRA driver (I2C 0x5A) |
+| `hid.py` | USB HID device (the knob IS a keyboard) |
+| `ws_client.py` | WebSocket client — connects to the PC server |
+| `plugin_manager.py` | Runtime plugin loading from machine configs |
+
+## Runtime Flow
 
 ```
-server.py                          Knob (physical or sim)
-   │                                      │
-   │  ── Step 1 ──                        │
-   │  {"type":"execute","code":"<boot>"}  │
-   │─────────────────────────────────────►│
-   │                                      │  Runs bootstrap.py
-   │  {"type":"bootstrap_response",       │  reports identity
-   │    "data":{"machine_guid":"..."}}    │
-   │◄─────────────────────────────────────│
-   │                                      │
-   │  ── Step 2 ──                        │
-   │  Match GUID → machine config         │
-   │  (glob pattern: SIM-*, MAC-*, etc)   │
-   │                                      │
-   │  {"type":"config","config":{...}}    │
-   │─────────────────────────────────────►│
-   │                                      │  Stores config
-   │  {"type":"config_ack","status":"ok"} │
-   │◄─────────────────────────────────────│
-   │                                      │
-   │  ── Step 3 ──                        │
-   │  {"type":"execute","code":"<launch>"}│
-   │─────────────────────────────────────►│
-   │                                      │  Builds app launcher
-   │  {"type":"launcher_ready",           │
-   │    "apps":[{"id":"volume",...}]}     │
-   │◄─────────────────────────────────────│
-   │                                      │
-   │  ── Interaction ──                   │
-   │  {"type":"app_selected","app":"vol"}"│
-   │◄─────────────────────────────────────│
-   │  {"type":"data_update",              │
-   │    "data":{"value":42}}              │
-   │─────────────────────────────────────►│
+boot.py ──► main.py ──► Launcher
+                           │
+                           ▼
+              ws_client connects to server.py (WS :8765)
+                           │
+              server serves bootstrap.py ──► reports machine GUID
+                           │
+              server sends config, then launcher.py ──► app UI
 ```
 
-## Hardware
-
-**Waveshare ESP32-S3-Knob-Touch-LCD-1.8**
-
-- ESP32-S3R8 (16MB Flash, 8MB PSRAM OPI)
-- SH8601 AMOLED QSPI 360x360 display
-- CST816 capacitive touch (I2C 0x15)
-- Non-quadrature encoder (two micro-switches)
-- DRV2605 haptic driver
-- PCM5100A audio DAC
-- USB-C with CH334 hub
-
-## Quick Start
-
-### Real PC Server
-
-```bash
-cd knob-control
-python3 server.py
-# Listens on WS :8765 for knob connections
-```
-
-### Test Simulator (browser-based)
-
-```bash
-cd knob-control
-python3 server.py &                    # Real server (background)
-python3 fs1/test-env/testKnob.py       # Test bridge
-# Open http://localhost:8080
-```
-
-The browser connects to testKnob.py's WS (:8766), which pipes everything to server.py (:8765). The full bootstrap flow runs transparently.
-
-### Physical Knob
-
-The ESP32-S3 connects to Wi-Fi, then opens a WebSocket to `server.py:8765`. The bootstrap flow starts immediately.
-
-## Machine Configs
-
-Each machine has a config file in `knob-control/machines/` named after its literal GUID:
-
-```json
-{
-    "name": "Development Sim",
-    "machine_guid": "sim-dev-001",
-    "location": "Simulator",
-    "haptic": false,
-    "sound": false,
-    "backlight": 100,
-    "apps": [
-        {"id": "volume",    "name": "Volume"},
-        {"id": "brightness","name": "Brightness"}
-    ]
-}
-```
-
-The filename is `{machine_guid}.json` (e.g. `sim-dev-001.json`). The server injects the machine list as `_AVAILABLE_MACHINES` into bootstrap.py before sending, and the test sim populates its Machine dropdown from the `machines` field on the `execute` message.
-`location` describes where the machine lives (Simulator, Office, Home, etc.).
-
-## Command Dictionary
-
-| Type | Direction | Purpose |
-|------|-----------|---------|
-| `execute` | Server → Knob | Run MicroPython code (includes `machines` array for sim dropdown) |
-| `bootstrap_response` | Knob → Server | Identity after bootstrap |
-| `config` | Server → Knob | Machine config |
-| `config_ack` | Knob → Server | Config accepted |
-| `launcher_ready` | Knob → Server | Launcher UI live |
-| `app_selected` | Knob → Server | User picked an app |
-| `action` | Knob → Server | App command (volume up, brightness set, etc) |
-| `data_update` | Either | App-specific state push |
-| `data_request` | Knob → Server | Request current state |
+The physical knob boots, connects to the PC server, and is served `bootstrap.py`, its machine config, and `launcher.py` — exactly like the browser simulator (`../fs1/test-env/`). It then drives the PC: app selections become `action` messages the server routes to platform handlers.
 
 ## Build & Flash
 
 ### Prerequisites
 
-- ESP-IDF v5.4+
+- ESP-IDF v5.4+ (cloned into `../hardware/esp-idf/`)
+- lv_micropython (in `../hardware/lv_micropython/`) — the MicroPython + LVGL build system; C extensions for it live in `firmware/`
 - Python 3.10+
 
 ### Build
 
 ```bash
-cd knob-control
+cd fs2
 idf.py set-target esp32s3
 idf.py menuconfig
 idf.py build
@@ -179,55 +77,33 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-## Environment Variables
+If flashing fails with "This chip is ESP32, not ESP32-S3", **flip the USB-C plug 180°** — the CH334 hub switches between the CH343 UART bridge and native USB-OTG depending on plug orientation.
 
-```bash
-export HA_URL="http://homeassistant.local:8123"
-export HA_TOKEN="your_long_lived_access_token"
+### Settings
+
+Wi-Fi credentials and the WebSocket URI live in `../fs1/settings.json`:
+
+```json
+{
+    "wifi": {"ssid": "", "password": ""},
+    "websocket_uri": "ws://10.10.10.2:8765",
+    "static_ip": {"knob": "10.10.10.1", "pc": "10.10.10.2"}
+}
 ```
 
-## Project Structure
+## Pin Map (Summary)
 
-```
-knob-control/
-├── server.py                PC server (bootstrap + command routing)
-├── bootstrap.py             Sent to knob — probes identity, reports GUID
-├── launcher.py              Sent to knob — builds app-launcher UI
-├── machines/                Per-location config JSON files
-│   ├── sim-dev-001.json
-│   ├── pc-abcd1234.json
-│   └── mac-m1-max.json
-├── CMakeLists.txt           ESP-IDF project
-├── sdkconfig.defaults       Board config
-├── partitions.csv           Flash partitions
-├── boot.py                  ESP32 boot
-├── main.py                  MicroPython entry point on knob
-├── lib/                     Frozen MicroPython modules
-│   ├── hardware.py
-│   ├── encoder.py
-│   ├── cst816.py
-│   ├── sh8601.py
-│   ├── hid.py
-│   ├── ws_client.py
-│   └── plugin_manager.py
-├── fs1/                     FAT32 partition (user-accessible)
-│   ├── machines/            (deprecated — configs live in ../machines/)
-│   ├── plugins/             Plugin scripts
-│   ├── pc/                  PC-side Python libs
-│   │   ├── setup.py
-│   │   ├── knob_client/
-│   │   │   └── main.py     KnobClient (platform handlers)
-│   │   └── ...
-│   └── test-env/            Browser-based test simulator
-│       ├── testKnob.py      Transparent WS bridge (no logic)
-│       ├── index.html       Simulator UI
-│       ├── static/
-│       │   ├── lvgl.html    LVGL + MicroPython WASM iframe
-│       │   └── micropython.js
-│       └── pc_client_adapter.py  (legacy: standalone test tool)
-└── protocol/
-    └── messages.py          Shared message types
-```
+| Function | GPIO |
+|----------|------|
+| Display SH8601 QSPI | CS 14, SCLK 13, D0–D3 15–18, RST 21, BL 47 |
+| Touch CST816 (I2C) | SDA 11, SCL 12, RST 10, INT 9 |
+| Encoder switches | A 8 (CW), B 7 (CCW) |
+| Haptic DRV2605 (I2C) | SDA 11, SCL 12, addr 0x5A |
+| DAC PCM5100A | Enable 0, BCLK 39, WS 40, DOUT 41 |
+| PDM mic | CLK 45, DATA 46 |
+| Battery ADC | 1 (×2, full ≈ 4.3V) |
+
+The full annotated pin map lives in the root `README.md` and in `main/pins.h`.
 
 ## License
 

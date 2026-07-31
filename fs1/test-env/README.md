@@ -14,9 +14,9 @@ Browser ──WS :8766──► testKnob.py ──WS :8765──► server.py
 ## Quick Start
 
 ```bash
-cd ../../                        # back to knob-control/
+cd ../                           # back to fs1/
 python3 server.py &               # Real PC server (WS :8765)
-cd fs1/test-env
+cd test-env
 python3 testKnob.py               # Test bridge (HTTP :8080, WS :8766)
 ```
 
@@ -59,4 +59,4 @@ test-env/
 └── README.md
 ```
 
-(bootstrap.py, launcher.py, and machines/ — GUID-named .json files — live in knob-control/ alongside server.py)
+(bootstrap.py, launcher.py, and machines/ — GUID-named .json files — live in fs1/ alongside server.py)
