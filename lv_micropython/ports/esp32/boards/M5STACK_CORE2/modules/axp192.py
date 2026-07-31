@@ -1,1 +1,0 @@
-../../../../../user_modules/lv_binding_micropython/driver/generic/axp192.py

@@ -1,5 +1,0 @@
-source "/workspaces/knob-controller/esp-idf/components/bootloader/Kconfig.projbuild"
-source "/workspaces/knob-controller/esp-idf/components/esp_app_format/Kconfig.projbuild"
-source "/workspaces/knob-controller/esp-idf/components/esp_rom/Kconfig.projbuild"
-source "/workspaces/knob-controller/esp-idf/components/esptool_py/Kconfig.projbuild"
-source "/workspaces/knob-controller/esp-idf/components/partition_table/Kconfig.projbuild"

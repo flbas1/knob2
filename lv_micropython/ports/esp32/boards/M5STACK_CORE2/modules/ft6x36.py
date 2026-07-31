@@ -1,1 +1,0 @@
-../../../../../user_modules/lv_binding_micropython/driver/generic/ft6x36.py
