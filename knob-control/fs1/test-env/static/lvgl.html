@@ -65,9 +65,15 @@ async function mpExecNext() {
   mpExecNext();
 }
 
+// Queue messages that arrive before mp_js_do_str is ready
+var mp_pending_messages = [];
 window.addEventListener('message', function(ev) {
-  if (ev.data && ev.data.execute && typeof mp_js_do_str !== 'undefined') {
-    mpEnqueue(ev.data.execute);
+  if (ev.data && ev.data.execute) {
+    if (typeof mp_js_do_str !== 'undefined') {
+      mpEnqueue(ev.data.execute);
+    } else {
+      mp_pending_messages.push(ev.data.execute);
+    }
   }
 });
 
@@ -101,6 +107,10 @@ function startKnobSimulator() {
     'import lvgl as lv\nlv.init()\ndisp = lv.sdl_window_create(480, 320)\nlv.sdl_window_set_title(disp, "Knob Simulator")\ndef on_touch(x, y, pressed):\n    pass\nprint("Ready")'
   ).then(function() {
     window.parent.postMessage({ type: 'mp_ready' }, '*');
+    // Flush any messages that arrived before mp_js_do_str was ready
+    while (mp_pending_messages.length > 0) {
+      mpEnqueue(mp_pending_messages.shift());
+    }
     // Drive LVGL rendering periodically (queued to avoid async conflicts)
     mp_render_timer = setInterval(function() {
       if (typeof mp_js_do_str !== 'undefined') {

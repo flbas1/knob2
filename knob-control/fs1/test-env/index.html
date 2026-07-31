@@ -44,6 +44,20 @@
         }
         .panel-section { padding: 15px; border-bottom: 1px solid #0f3460; }
         .panel-section h3 { font-size: 12px; color: #e94560; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        .guid-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+        .guid-row label { font-size: 11px; color: #888; }
+        .guid-row input, .guid-row select {
+            padding: 6px 8px; border: 1px solid #0f3460; background: #0d1117;
+            color: #c9d1d9; border-radius: 4px; font-family: monospace; font-size: 13px;
+        }
+        .guid-row select { cursor: pointer; }
+        .guid-row select option { background: #0d1117; color: #c9d1d9; }
+        .ws-status-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+        .ws-status-row .status-dot {
+            width: 8px; height: 8px; border-radius: 50%; background: #555;
+            transition: background 0.3s;
+        }
+        .ws-status-row .status-dot.connected { background: #3fb950; }
         .encoder-controls { display: flex; flex-direction: column; align-items: center; gap: 12px; }
         .knob-visual {
             width: 120px; height: 120px; border-radius: 50%;
@@ -110,10 +124,7 @@
     <div class="header">
         <h1>Smart Knob Simulator</h1>
         <div class="status">
-            <div class="status-dot" id="ws-status"></div>
-            <span id="ws-status-text">Disconnected</span>
-            <span style="margin-left:10px;color:#444">|</span>
-            <span id="mp-status" style="margin-left:10px;color:#666">MicroPython: Not loaded</span>
+            <span id="mp-status" style="color:#666">MicroPython: Not loaded</span>
         </div>
     </div>
 
@@ -126,6 +137,20 @@
         </div>
 
         <div class="side-panel">
+            <div class="panel-section">
+                <h3>Knob Identity</h3>
+                <div class="guid-row">
+                    <label for="guid-input">Machine:</label>
+                    <select id="guid-input">
+                        <option value="">— waiting for bootstrap —</option>
+                    </select>
+                </div>
+                <div class="ws-status-row">
+                    <span id="ws-status-text">Disconnected</span>
+                    <span id="ws-status" class="status-dot"></span>
+                </div>
+            </div>
+
             <div class="panel-section">
                 <h3>Encoder</h3>
                 <div class="encoder-controls">
@@ -162,7 +187,7 @@
 // Smart Knob Simulator
 // =============================================
 
-const WS_URL = `ws://${location.hostname || 'localhost'}:8765`;
+const WS_URL = `ws://${location.hostname || 'localhost'}:8766`;
 let ws = null;
 let wsConnected = false;
 let mpReady = false;
@@ -207,8 +232,8 @@ function connectWs() {
 
     ws.onopen = () => {
         wsConnected = true;
-        $('ws-status').classList.add('connected');
-        $('ws-status-text').textContent = 'Connected to bridge';
+        document.getElementById('ws-status').classList.add('connected');
+        document.getElementById('ws-status-text').textContent = 'Connected to bridge';
         log('WebSocket connected to bridge', 'ok');
         ws.send(JSON.stringify({ sender: 'browser', type: 'ready' }));
     };
@@ -225,8 +250,8 @@ function connectWs() {
 
     ws.onclose = () => {
         wsConnected = false;
-        $('ws-status').classList.remove('connected');
-        $('ws-status-text').textContent = 'Disconnected';
+        document.getElementById('ws-status').classList.remove('connected');
+        document.getElementById('ws-status-text').textContent = 'Disconnected';
         log('WebSocket disconnected — retrying in 3s...', 'error');
         setTimeout(connectWs, 3000);
     };
@@ -241,8 +266,53 @@ function wsSend(data) {
     }
 }
 
+function populateMachineDropdown(machines) {
+    const sel = document.getElementById('guid-input');
+    sel.innerHTML = '';
+    if (!machines || machines.length === 0) {
+        sel.innerHTML = '<option value="">— no machines configured —</option>';
+        return;
+    }
+    let firstVal = '';
+    machines.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.guid;
+        opt.textContent = `${m.name} (${m.location})`;
+        sel.appendChild(opt);
+        if (!firstVal) firstVal = opt.value;
+    });
+    if (sel.value === '' || sel.value === '— waiting for bootstrap —') {
+        sel.value = firstVal;
+    }
+    log(`Loaded ${machines.length} machine configs`, 'ok');
+}
+
 function handleWsMsg(msg) {
-    if (msg.type === 'data_update') {
+    if (msg.machines) {
+        populateMachineDropdown(msg.machines);
+    }
+    if (msg.type === 'execute') {
+        window._bootstrapped = true;
+        if (window._bootstrapTimer) {
+            clearTimeout(window._bootstrapTimer);
+            window._bootstrapTimer = undefined;
+        }
+        let code = msg.code;
+        const guidOverride = document.getElementById('guid-input').value.trim();
+        if (guidOverride) {
+            code = `_MACHINE_GUID = "${guidOverride}"\n` + code;
+        }
+        log(`Executing code from server (${code.length} chars)`, 'info');
+        runInSimulator(code);
+    } else if (msg.type === 'config') {
+        const config = msg.config;
+        log(`Config received: ${JSON.stringify(config).slice(0, 80)}...`, 'info');
+        runInSimulator(`
+import json
+_MACHINE_CONFIG = ${JSON.stringify(config).replace(/:true/g,':True').replace(/:false/g,':False').replace(/:null/g,':None')}
+print(json.dumps({"type": "config_ack", "status": "ok"}))
+`);
+    } else if (msg.type === 'data_update') {
         log(`Data update: ${msg.app} = ${JSON.stringify(msg.data)}`, 'info');
         runInSimulator(`
 import json
@@ -278,10 +348,30 @@ window.addEventListener('message', (ev) => {
         $('mp-status').textContent = 'MicroPython: Ready';
         $('mp-status').style.color = '#4caf50';
         log('MicroPython WASM loaded', 'ok');
-        loadDefaultCode();
+        // Fallback: if no bootstrap from server within 2s, load default code
+        if (window._bootstrapTimer === undefined) {
+            window._bootstrapTimer = setTimeout(() => {
+                if (!window._bootstrapped) {
+                    log('No bootstrap received — loading default code', 'info');
+                    loadDefaultCode();
+                }
+            }, 2000);
+        }
     }
     if (ev.data && ev.data.stdout) {
-        log(`MP: ${ev.data.stdout}`, 'info');
+        const text = ev.data.stdout.trim();
+        log(`MP: ${text}`, 'info');
+        // Forward JSON messages from MicroPython back to the bridge
+        if (text.startsWith('{') && text.endsWith('}')) {
+            try {
+                const mpMsg = JSON.parse(text);
+                if (mpMsg.type) {
+                    wsSend(mpMsg);
+                }
+            } catch (e) {
+                // Not JSON — just a print
+            }
+        }
     }
     if (ev.data && ev.data.stderr) {
         log(`MP ERR: ${ev.data.stderr}`, 'error');

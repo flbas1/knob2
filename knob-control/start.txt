@@ -1,0 +1,19 @@
+# Start the Smart Knob
+
+## Terminal 1 — PC Server
+cd /workspaces/knob-controller/knob-control
+python3 server.py
+
+## Terminal 2 — Test Bridge
+cd /workspaces/knob-controller/knob-control
+python3 fs1/test-env/testKnob.py
+
+## Browser
+Open http://localhost:8080
+
+Expect:
+1. WS connects → status dot green
+2. Machine dropdown populates (Development Sim, Office PC, Home Mac)
+3. Bootstrap sent → sim runs → bootstrap_response back
+4. Server matches config → sends it → sim acks
+5. Server sends launcher → sim builds app UI

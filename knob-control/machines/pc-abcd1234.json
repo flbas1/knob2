@@ -1,0 +1,14 @@
+{
+    "name": "Office PC",
+    "machine_guid": "pc-abcd1234",
+    "location": "Office",
+    "haptic": true,
+    "sound": false,
+    "backlight": 80,
+    "wifi": {"ssid": "", "password": ""},
+    "apps": [
+        {"id": "volume",    "name": "Volume"},
+        {"id": "brightness","name": "Brightness"},
+        {"id": "zoom",      "name": "Zoom"}
+    ]
+}

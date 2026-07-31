@@ -1,0 +1,15 @@
+{
+    "name": "Development Sim",
+    "machine_guid": "sim-dev-001",
+    "location": "Simulator",
+    "haptic": false,
+    "sound": false,
+    "backlight": 100,
+    "wifi": {"ssid": "", "password": ""},
+    "apps": [
+        {"id": "volume",    "name": "Volume"},
+        {"id": "brightness","name": "Brightness"},
+        {"id": "zoom",      "name": "Zoom"},
+        {"id": "scroll",    "name": "Scroll"}
+    ]
+}
