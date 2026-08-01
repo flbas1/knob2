@@ -29,7 +29,7 @@ def setup(parent, hardware):
     name_label = lv.label(parent)
     name_label.set_text("Scroll")
     name_label.set_style_text_color(lv.color_hex(0xAAAAAA), 0)
-    name_label.set_style_text_font(lv.font_montserrat_20, 0)
+    name_label.set_style_text_font(_font('font_montserrat_20', 'font_montserrat_24', 'font_montserrat_16'), 0)
     name_label.align(lv.ALIGN.TOP_MID, 0, 40)
 
     _arc = lv.arc(parent)
@@ -49,12 +49,12 @@ def setup(parent, hardware):
     _value_label = lv.label(_arc)
     _value_label.set_text("0")
     _value_label.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
-    _value_label.set_style_text_font(lv.font_montserrat_28, 0)
+    _value_label.set_style_text_font(_font('font_montserrat_28', 'font_montserrat_24', 'font_montserrat_16'), 0)
     _value_label.align(lv.ALIGN.CENTER, 0, 0)
 
     icon_label = lv.label(parent)
-    icon_label.set_text(lv.SYMBOL_REFRESH)
-    icon_label.set_style_text_font(lv.font_montserrat_28, 0)
+    icon_label.set_text(_symbol('SYMBOL_REFRESH', 'SYMBOL_SHUFFLE', 'SYMBOL_LEFT'))
+    icon_label.set_style_text_font(_font('font_montserrat_28', 'font_montserrat_24', 'font_montserrat_16'), 0)
     icon_label.set_style_text_color(lv.color_hex(0xFF9500), 0)
     icon_label.align(lv.ALIGN.CENTER, 0, 120)
 

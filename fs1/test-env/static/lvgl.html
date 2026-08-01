@@ -109,9 +109,9 @@ function startKnobSimulator() {
     window.parent.postMessage({ type: 'stdout', stdout: text }, '*');
   });
 
-  // Create SDL display (no widgets — editor code handles those)
+  // Create SDL display (360x360 to match the round knob canvas 1:1)
   mp_js_do_str(
-    'import lvgl as lv\nlv.init()\ndisp = lv.sdl_window_create(480, 320)\nlv.sdl_window_set_title(disp, "Knob Simulator")\ndef on_touch(x, y, pressed):\n    pass\nprint("Ready")'
+    'import lvgl as lv\nlv.init()\ndisp = lv.sdl_window_create(360, 360)\nlv.sdl_window_set_title(disp, "Knob Simulator")\ndef on_touch(x, y, pressed):\n    pass\nprint("Ready")'
   ).then(function() {
     mp_interp_ready = true;
     window.parent.postMessage({ type: 'mp_ready' }, '*');

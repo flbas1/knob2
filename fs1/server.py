@@ -13,6 +13,22 @@ MACHINES_DIR = os.path.join(SCRIPT_DIR, 'machines')
 BOOTSTRAP_PATH = os.path.join(SCRIPT_DIR, 'bootstrap.py')
 LAUNCHER_PATH = os.path.join(SCRIPT_DIR, 'launcher.py')
 
+
+def _py_literal(obj):
+    """Serialize a JSON-ish object as a valid Python literal (True/False/None)."""
+    if isinstance(obj, bool):
+        return 'True' if obj else 'False'
+    if obj is None:
+        return 'None'
+    if isinstance(obj, str):
+        return json.dumps(obj)
+    if isinstance(obj, dict):
+        return '{' + ', '.join(_py_literal(k) + ': ' + _py_literal(v)
+                               for k, v in obj.items()) + '}'
+    if isinstance(obj, (list, tuple)):
+        return '[' + ', '.join(_py_literal(x) for x in obj) + ']'
+    return repr(obj)
+
 sys.path.insert(0, os.path.join(SCRIPT_DIR, 'pc'))
 from knob_client.main import KnobClient
 
@@ -148,9 +164,62 @@ class KnobServer:
                 launch_code = f.read()
         except OSError:
             print("[server] launcher.py not found"); return None
+
+        apps = self._build_app_list(config)
+        if apps:
+            launch_code = "_SERVER_APPS = " + _py_literal(apps) + "\n" + launch_code
+            print(f"[server] Injected {len(apps)} apps into launcher")
+
         print("[server] Sending launcher.py...")
         self._send_ws_text(sock, json.dumps({"type": "execute", "file": "launcher.py", "code": launch_code}))
         return buf
+
+    def _build_app_list(self, machine):
+        """Merge a machine's app list with the plugin manifests + code on disk."""
+        manifests = self._load_plugin_manifests()
+        apps = []
+        for app in machine.get('apps') or []:
+            pid = app.get('id')
+            if not pid:
+                continue
+            man = manifests.get(pid, {})
+            entry = {k: v for k, v in man.items()}
+            entry['id'] = pid
+            entry['name'] = app.get('name') or man.get('name') or pid
+            entry['icon'] = app.get('icon') or man.get('icon')
+            entry['icon_data'] = man.get('icon_data')
+            entry['code'] = self._read_plugin_code(pid)
+            apps.append(entry)
+        return apps
+
+    def _read_plugin_code(self, pid):
+        """Read a plugin's source so the knob can run it without local files."""
+        path = os.path.join(SCRIPT_DIR, 'plugins', pid, 'plugin.py')
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _load_plugin_manifests(self):
+        """Scan fs1/plugins/*/manifest.json for plugin metadata."""
+        manifests = {}
+        plugins_dir = os.path.join(SCRIPT_DIR, 'plugins')
+        if not os.path.isdir(plugins_dir):
+            return manifests
+        for name in os.listdir(plugins_dir):
+            mpath = os.path.join(plugins_dir, name, 'manifest.json')
+            if not os.path.isfile(mpath):
+                continue
+            try:
+                with open(mpath) as f:
+                    m = json.load(f)
+                manifests[m.get('id', name)] = m
+            except Exception as e:
+                print(f"[server] Bad manifest {mpath}: {e}")
+        return manifests
 
     def _match_machine(self, guid):
         if not os.path.isdir(MACHINES_DIR):
@@ -214,6 +283,12 @@ class KnobServer:
         elif t == "data_request":
             app = msg.get("app", "")
             self.client._handle_data_request(app)
+
+        elif t == "app_loaded":
+            print(f"[server] App running: {msg.get('name') or msg.get('app')}")
+
+        elif t == "app_closed":
+            print(f"[server] App stopped: {msg.get('app')}")
 
         else:
             print(f"[server] Unknown message: {t}")

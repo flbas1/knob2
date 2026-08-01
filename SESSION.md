@@ -4,7 +4,25 @@ Saved session state for continuity between work sessions.
 
 ## Objective
 - Finish the Smart Knob system: PC server (`fs1/server.py`) drives bootstrap → config → launcher with literal-GUID machine configs; browser sim bridged via `testKnob.py`.
-- Latest task: make the LVGL WASM sim (`lvgl.html` iframe) actually run `bootstrap.py` and `launcher.py` end-to-end (bootstrap → config_ack → launcher home screen → command loop).
+- **Current milestone: apps load + execute on select, with visible proof on the page.** Selecting Volume in the sim runs its `plugin.py` (harness + browser console verify `[volume] Active`). User complained the page gave no visual proof ("bottom left says launcher — not volume; apps look visually similar") → added `app_loaded`/`app_closed` JSON messages from the launcher that drive the `#current-file` bar to `volume.py — running` and log "App loaded: Volume".
+
+## Latest milestone — apps in a clock formation (verified in harness)
+- App source of truth = the machine config's `apps` list (from `_MACHINE_CONFIG`), merged with `/fs1/plugins/*/manifest.json` metadata. Server injects the merged list into the launcher as `_SERVER_APPS` (server.py `_build_app_list` reads machine `apps` + `_load_plugin_manifests` from disk); launcher prefers `_SERVER_APPS`, falls back to `_MACHINE_CONFIG['apps']`, then to scanning `/fs1/plugins`.
+- Home screen: apps placed by `_clock_positions(n)` — radius 110, start at 12 o'clock, clockwise: 4 apps → (0,-110),(110,0),(0,110),(-110,0); 6 apps → (0,-110),(95,-55),(95,55),(0,110),(-95,55),(-95,-55). Machine name ("Home Mac") stays centered. Temp icon = first letter (e.g. V, M, B, S) in a 72px circle; name below.
+- Sim input routing: launcher now defines module-level `on_encoder(delta)`, `on_button()`, `on_touch(x,y,pressed)` that dispatch to the singleton via `_launcher_instance` (set in `run()`). Browser's existing `sendEncoder`/`sendButton`/canvas-touch call these directly — no bridge/HTML changes needed.
+- Encoder on home = `home_selected = (home_selected + delta) % len(apps)` (wraps). Tap icon = select + `_enter_plugin`. In sim, `_enter_plugin` shows a placeholder plugin screen (app name + "tap to return"); tapping anywhere or button returns home. On real hardware it still goes through `plugin_mgr.activate`.
+- **Display made square: `lv.sdl_window_create(360, 360)`** (was 480×320) so canvas↔LVGL coords are 1:1 and touch hit-testing (center 180,180, radius 36) lines up with the 360×360 round canvas. Verified the square display works in the harness.
+- Manifest icon scaffold: `_build_app_list` copies `icon` and `icon_data` (base64 PNG, future) into each app entry; launcher stores them but renders the first letter for now because the sim build has NO `lv.png` decoder (only `lv.image` widget, no runtime PNG decode).
+- Harness-verified full interaction: `on_encoder(1)`→1, `+1`→2, `-1`→1; `on_touch(180,70,1)`→"Launching app: Volume"→screen `plugin`; `on_touch(0,0,1)`→`home`; `on_button()`→`plugin`. Also verified `_SERVER_APPS` path with 6 apps.
+- iframe cache-buster bumped to `lvgl.html?v=7` (lvgl.html display-size change).
+- **Bootstrap now gated on a Start button** (user bug: "once the page renders, bootstrap is done, and I never get a chance to set the location"): server auto-sent bootstrap on connect and the dropdown's first-machine default was applied before the user could interact. Fix in `index.html`: `execute` messages with `file === 'bootstrap.py'` are stored raw in `window._pendingBootstrap` (override NOT baked in), a green `#btn-start` enables, and Start applies the dropdown's `_MACHINE_GUID` override at press time and runs it. Non-bootstrap executes still run immediately. Changing the dropdown after Start requires a page reload (fresh WS → fresh gated bootstrap).
+- **Selecting an app loads + executes its code (verified: volume).** Server `_build_app_list` now embeds each plugin's `plugin.py` source as `code` in the app entry (read from `fs1/plugins/<id>/plugin.py`); launcher `_enter_plugin` runs it via `exec(code, plugin_module)` with `_font`/`_symbol` helpers injected, calls `setup(container, {'hid':…, 'ws_client':…})` + `start()`, and routes `on_encoder`/`on_button`/`on_data_update`/`stop()` to the live module. Real-hardware fallback reads `/fs1/plugins/<id>/plugin.py`. Apps with no code (e.g. `music`) still get the placeholder screen.
+- **Plugin sim-compat:** all 4 plugins now use `_font('font_montserrat_20','font_montserrat_24','font_montserrat_16')` and `_symbol('SYMBOL_VOLUME_FULL','SYMBOL_AUDIO')` etc. because the sim build lacks `font_montserrat_20/28` and `SYMBOL_VOLUME_FULL`/`SYMBOL_BRIGHTNESS`/`SYMBOL_REFRESH`/`SYMBOL_ZOOM_IN` (only `lv.SYMBOL.AUDIO/SHUFFLE/EDIT/LEFT`…). `arc.clean()` DOES exist in the binding. Helpers are injected by the launcher at exec time, so plugins stay standalone-ish.
+- **Bug caught by harness:** `_load_apps` originally copied only id/name/icon/icon_data from the server app entry (dropping `code`, `version`, `settings`) → apps fell back to the placeholder. Now merges all non-null server fields.
+- Harness-verified volume flow: tap Volume icon → `[launcher] Launching app: Volume` → `[volume] Active` → encoder +3 → 50→59 → -100 → clamped 0 → tap → `[volume] Stopped` → home. App message size ~37KB (launcher + embedded plugin sources), fine over WS.
+- **Running-app visibility (new):** launcher prints `{"type":"app_loaded","app":"volume","name":"Volume"}` after a successful enter (also after the no-code placeholder screen) and `{"type":"app_closed","app":"volume"}` in `_go_home`. `index.html` stdout handler parses these: `app_loaded` sets the `#current-file` bar to `<app>.py — running` + logs "App loaded: <name>" (ok color); `app_closed` resets it to `launcher.py`. They are NOT forwarded to the bridge WS (server.py `_route_message` still handles both for clean logging: "App running: …" / "App stopped: …").
+- Harness-verified both messages: enter Volume → `{"app":"volume","name":"Volume","type":"app_loaded"}` → tap return → `[volume] Stopped` + `{"app":"volume","type":"app_closed"}` → home.
+- Note: entering an app with an `on_button` (e.g. Volume = mute toggle) means the button does NOT return home; tapping the plugin screen does (`_handle_touch` → `_go_home`).
 
 ## Important Details
 - Knob-as-host framing (user): "the knob is the host — it controls the pc. the pc is the client… a very symbiotic relationship."
@@ -49,7 +67,7 @@ Saved session state for continuity between work sessions.
 - `bootstrap.py` reports `server_version` + `location`; `server.py` injects `_SERVER_VERSION` and logs version/location.
 - `launcher.py` made sim-compatible AND executable: guarded `os`/`utime` imports, `_SimHardware`, stub `_SimPluginManager`, font fallbacks, `_symbol` for `lv.SYMBOL.X`, `_obj_flag`/`_clear_flag`/`_add_flag` gating, method-style indev (`set_type`/`set_read_cb`), `if __name__=='__main__': Launcher().run()`. `py_compile` passes.
 - **Node harness built (`/tmp/knob-test/`)** — runs the real firmware.wasm in Node with the browser-init sequence replicated; used to find the exact importable-module set and every LVGL API incompatibility.
-- **Harness-verified: launcher runs to completion** with output: `Simulator mode — hardware module not available` → `HID init failed` → `WebSocket init failed` → `Simulator mode — plugin_manager module not available` → `Using config from server: Home Mac` → `Enabled plugins: []` → `Ready. Entering main loop.` → `Simulator mode — host render loop drives LVGL.`
+- **Harness-verified: launcher runs to completion** with output: `Simulator mode — hardware module not available` → `HID init failed` → `WebSocket init failed` → `Simulator mode — plugin_manager module not available` → `Using config from server: Home Mac` → `Apps: [...]` → `Ready. N app(s). Entering main loop.` → `Simulator mode — host render loop drives LVGL.`
 - Cache-busters added so browser uses the disk build: `micropython.js?v=2`, `firmware.wasm?v=2` (locateFile), iframe `lvgl.html?v=6`.
 - Last confirmed server run: bootstrap → config (Home Mac) → config_ack → launcher.py sent → "Bootstrap complete — entering command loop".
 - Root README.md + `fs2/README.md` rewritten (fs2 = firmware-build-only); `fs1/test-env/README.md` patched.
@@ -57,27 +75,29 @@ Saved session state for continuity between work sessions.
 - Commit `604bd5e2` pushed. Legacy constants in `fs1/pc/knob_client/main.py` (lines 26–32) removed.
 
 ### Active / Pending
-- Server restarted and listening on :8765; waiting for the user's browser to reconnect. Browser must HARD-REFRESH `http://localhost:8080` (Ctrl+Shift+R) so the iframe + `micropython.js?v=2` + `firmware.wasm?v=2` load fresh (this swaps the stale build for the disk build the harness validated).
-- Need to confirm the sim home screen now renders black canvas + "Home Mac" label (launcher sim mode) and no further Tracebacks in browser log.
-- Encoder navigation to LVGL not yet wired: parent encoder events currently go WS → server, never into the sim; sim `_SimHardware.encoder = None` so `_main_loop` polling is moot.
+- Server restarted (pid 228377 → restarted with `app_loaded`/`app_closed` handling) and listening on :8765. User hard-refreshes `http://localhost:8080` → pick machine → Start Bootstrap.
+- Confirm in browser: tap/click Volume → file bar flips to `volume.py — running`, console logs `App loaded: Volume`; the arc UI shows (that's the proof apps run); spin encoder → % changes; tap canvas → bar back to `launcher.py`, `App closed: volume`.
+- Real app icons: source PNGs → base64 into each plugin `manifest.json` `icon_data` field (scaffold reads it). Rendering needs a PNG decode path in the sim build (none today) — alternatives: LVGL C-image `.c` files, or a sprite font.
+- Future: re-bootstrap mid-connection (server currently one-shot per connection; changing machine needs a page reload).
 - Sim diagnostics still in place (WS close codes, iframe load/unload postMessage events) — removable once testing settles.
-- Uncommitted changes pending: `.gitignore` (server.log), `fs1/server.py`, `fs1/test-env/testKnob.py`, `fs1/test-env/index.html`, `fs1/test-env/static/lvgl.html`, `fs1/bootstrap.py`, `fs1/launcher.py`, `restart-server.sh`, plus `SESSION.md`.
+- Uncommitted: this milestone's launcher/server/lvgl.html/index.html changes + SESSION.md.
 
 ### Blocked
-- (none) — launcher boots and completes in the harness; awaiting live-browser confirmation after hard refresh.
+- (none) — apps execute inside the sim and the launcher now reports which app is running; awaiting live-browser confirmation of the file-bar/`App loaded` indicator after a hard refresh.
 
 ## Next Move
-1. User hard-refreshes sim (in progress). Confirm in browser log: `[launcher] Simulator mode — hardware module not available`, `[launcher] Using config from server: Home Mac`, `[launcher] Ready... Simulator mode — host render loop drives LVGL.` and canvas shows "Home Mac". If any import/API error appears, iterate via the Node harness first (`node /tmp/knob-test/harness.js run_launcher.py`).
-2. If clean, commit pending changes (launcher sim-compat, iframe race fixes, cache-busters, harness docs, server_version/location injection, restart script).
-3. Future: wire browser encoder → sim (`on_encoder`/LVGL indev) so icon navigation works; sync editor↔server file handling.
+1. User hard-refreshes the sim and presses Start Bootstrap after picking a machine.
+2. Confirm: tap Volume → file bar `volume.py — running` + console `App loaded: Volume` + arc UI appears; encoder changes %, tap canvas → bar `launcher.py` + `App closed: volume`.
+3. If clean, commit ("apps load + execute visibly: launcher emits app_loaded/app_closed; page file-bar + log shows the running app").
+4. Future: real base64 PNG icons (needs a decode path), mid-connection re-bootstrap, wire plugin.py HID/WS effects (volume actually changing system volume in sim isn't possible — the arc + routing is the deliverable).
 
 ## Relevant Files
-- `/workspaces/knob-controller/fs1/test-env/static/lvgl.html`: WASM iframe; `mp_interp_ready` gate + queue flush; `code_received` ACK; `micropython.js?v=2` + `locateFile ?v=2`; 16ms `lv.timer_handler()` render pump; `on_touch`.
-- `/workspaces/knob-controller/fs1/test-env/index.html`: resizable right panel; editor mirrors server code; `_lastServerCode` resend-on-`mp_ready`; `code_received` clears; `#current-file` bar; `?v=6` iframe.
+- `/workspaces/knob-controller/fs1/test-env/static/lvgl.html`: WASM iframe; `mp_interp_ready` gate + queue flush; `code_received` ACK; `micropython.js?v=2` + `locateFile ?v=2`; 16ms `lv.timer_handler()` render pump; `on_touch`; square `lv.sdl_window_create(360, 360)`.
+- `/workspaces/knob-controller/fs1/test-env/index.html`: resizable right panel; editor mirrors server code; `_lastServerCode` resend-on-`mp_ready`; `code_received` clears; `#current-file` bar (now also driven by `app_loaded`/`app_closed`); `?v=7` iframe.
 - `/workspaces/knob-controller/fs1/test-env/testKnob.py`: transparent bridge (:8080 + :8766 → :8765); `s.settimeout(None)` after handshake; ReuseTCPServer.
-- `/workspaces/knob-controller/fs1/server.py`: `SERVER_VERSION = "0.1.0"`; preamble injection; logs version + location.
+- `/workspaces/knob-controller/fs1/server.py`: `SERVER_VERSION = "0.1.0"`; preamble injection; `_build_app_list` merges machine `apps` + plugin manifests → injects `_SERVER_APPS` into launcher; `_route_message` handles `app_loaded`/`app_closed`.
 - `/workspaces/knob-controller/fs1/bootstrap.py`: resolves `location` from `_AVAILABLE_MACHINES` by GUID; reports `server_version`.
-- `/workspaces/knob-controller/fs1/launcher.py`: sim-compatible + executable launcher (guarded os/utime, hardware/plugin fallbacks, font/symbol/flag fallbacks, method-style indev, `__main__` run hook).
+- `/workspaces/knob-controller/fs1/launcher.py`: sim-compatible + executable launcher; `_load_apps`/`_load_plugin_manifests`; `_clock_positions` clock formation; first-letter temp icons; module-level `on_encoder`/`on_button`/`on_touch` → `_launcher_instance`; `_enter_plugin` execs embedded `code` (+ `_font`/`_symbol` helpers) and emits `app_loaded`; `_go_home` emits `app_closed`; `__main__` run hook.
 - `/tmp/knob-test/`: Node harness — `micropython.patched.js`, `harness.js`, `globals.js`, `run_launcher.py`, t*.py probes, `firmware.wasm` copy.
 - `restart-server.sh`: kills server by port-PID, restarts with cleared server.log.
 - `/workspaces/knob-controller/server.log` (server output), `/tmp/bridge.log` (bridge output).

@@ -92,6 +92,14 @@
             transition: background 0.15s;
         }
         .btn-press:active { background: #e94560; color: white; }
+        .btn-start {
+            width: 100%; padding: 10px; margin-top: 10px; border: 2px solid #3fb950;
+            background: #1a1a2e; color: #3fb950; border-radius: 6px;
+            cursor: pointer; font-size: 14px; font-weight: bold;
+            transition: background 0.15s;
+        }
+        .btn-start:hover:not(:disabled) { background: #3fb950; color: white; }
+        .btn-start:disabled { opacity: 0.4; cursor: default; }
         .code-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
         .code-editor textarea {
             flex: 1; background: #0d1117; color: #c9d1d9; border: none;
@@ -148,7 +156,7 @@
     <div class="main">
         <div class="sim-panel">
             <div class="sim-frame" id="sim-frame">
-                <iframe id="mp-frame" src="static/lvgl.html?v=6"></iframe>
+                <iframe id="mp-frame" src="static/lvgl.html?v=7"></iframe>
             </div>
             <p class="help-text">Click display to touch · Arrow keys to rotate encoder · Ctrl+Enter to run code</p>
         </div>
@@ -168,6 +176,7 @@
                     <span id="ws-status-text">Disconnected</span>
                     <span id="ws-status" class="status-dot"></span>
                 </div>
+                <button class="btn-start" id="btn-start" disabled>Start Bootstrap</button>
             </div>
 
             <div class="panel-section">
@@ -330,6 +339,17 @@ function handleWsMsg(msg) {
             window._bootstrapTimer = undefined;
         }
         let code = msg.code;
+        if (msg.file === 'bootstrap.py') {
+            // Gate bootstrap on user choice of machine/location.
+            // Keep the raw code; the _MACHINE_GUID override is applied on Start
+            // so the dropdown can still be changed before bootstrapping.
+            window._pendingBootstrap = code;
+            const btn = $('btn-start');
+            btn.disabled = false;
+            btn.textContent = 'Start Bootstrap';
+            log('Bootstrap ready — pick a machine above, then press Start Bootstrap', 'info');
+            return;
+        }
         const guidOverride = document.getElementById('guid-input').value.trim();
         if (guidOverride) {
             code = `_MACHINE_GUID = "${guidOverride}"\n` + code;
@@ -423,7 +443,14 @@ window.addEventListener('message', (ev) => {
         if (text.startsWith('{') && text.endsWith('}')) {
             try {
                 const mpMsg = JSON.parse(text);
-                if (mpMsg.type) {
+                if (mpMsg.type === 'app_loaded') {
+                    $('current-file').value = (mpMsg.app || 'app') + '.py — running';
+                    log(`App loaded: ${mpMsg.name || mpMsg.app}`, 'ok');
+                } else if (mpMsg.type === 'app_closed') {
+                    $('current-file').value = 'launcher.py';
+                    log(`App closed: ${mpMsg.app || ''}`, 'info');
+                }
+                if (mpMsg.type && mpMsg.type !== 'app_loaded' && mpMsg.type !== 'app_closed') {
                     wsSend(mpMsg);
                 }
             } catch (e) {
@@ -601,6 +628,24 @@ $('btn-ccw').addEventListener('click', () => {
 });
 
 $('btn-press').addEventListener('click', sendButton);
+
+$('btn-start').addEventListener('click', () => {
+    const raw = window._pendingBootstrap;
+    if (!raw) return;
+    window._pendingBootstrap = null;
+    $('btn-start').disabled = true;
+    const guidOverride = document.getElementById('guid-input').value.trim();
+    const code = guidOverride
+        ? `_MACHINE_GUID = "${guidOverride}"\n` + raw
+        : raw;
+    $('current-file').value = 'bootstrap.py';
+    log(`Starting bootstrap (${guidOverride || 'default simulator'})...`, 'info');
+    codeEditor.value = code;
+    runInSimulator(code);
+    if (!mpFrameReady) {
+        window._lastServerCode = code;
+    }
+});
 
 // Resizable right panel (not persisted)
 const resizeHandle = $('resize-handle');

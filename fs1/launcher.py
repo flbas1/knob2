@@ -9,6 +9,7 @@ Home screen shows plugin icons in a diamond/cross pattern on the
 """
 import gc
 import json
+import math
 
 # os/time/utime are not all present in every MicroPython build — degrade
 # gracefully so the launcher still boots (imports must not kill the file).
@@ -40,15 +41,12 @@ except ImportError:
     print("[launcher] LVGL not available — running in stub mode")
 
 
-# Icon positions on 360x360 display (diamond/cross pattern)
-ICON_POSITIONS = [
-    (0, -110),    # Top
-    (110, 0),     # Right
-    (0, 110),     # Bottom
-    (-110, 0),    # Left
-]
+# Icon positions on 360x360 display — computed in a clock formation.
+ICON_RADIUS = 110
+ICON_SIZE = 72
+ICON_HIT = 36
 
-# LVGL symbol mapping for common plugin icons
+# LVGL symbol mapping for common plugin icons (kept for future icon support)
 def _symbol(*names):
     if not LVGL_AVAILABLE:
         return None
@@ -62,16 +60,6 @@ def _symbol(*names):
         except (AttributeError, TypeError):
             continue
     return None
-
-ICON_SYMBOLS = {
-    'volume': _symbol('SYMBOL_AUDIO', 'SYMBOL_VOLUME_FULL'),
-    'zoom': _symbol('SYMBOL_EDIT', 'SYMBOL_ZOOM_IN'),
-    'scroll': _symbol('SYMBOL_SHUFFLE', 'SYMBOL_REFRESH'),
-    'brightness': _symbol('SYMBOL_AUDIO', 'SYMBOL_BRIGHTNESS'),
-    'music': _symbol('SYMBOL_AUDIO'),
-    'settings': _symbol('SYMBOL_SETTINGS'),
-    'default': _symbol('SYMBOL_WIFI'),
-}
 
 # Fonts — prefer exact, fall back to whatever the build ships
 def _font(*names):
@@ -119,9 +107,24 @@ ANIM_PULSE = 'pulse'
 ANIM_ROTATE = 'rotate'
 ANIM_BOUNCE = 'bounce'
 
+# Route sim input (on_encoder / on_touch / on_button) to the running launcher.
+_launcher_instance = None
+
+def on_encoder(delta):
+    if _launcher_instance:
+        _launcher_instance._handle_encoder(delta)
+
+def on_button():
+    if _launcher_instance:
+        _launcher_instance._handle_button()
+
+def on_touch(x, y, pressed):
+    if _launcher_instance and pressed:
+        _launcher_instance._handle_touch(x, y)
+
 
 class Launcher:
-    """Home screen launcher with plugin switching."""
+    """Home screen launcher with app switching."""
 
     def __init__(self):
         self.hardware = None
@@ -138,10 +141,15 @@ class Launcher:
         self.home_selected = 0
         self.machine_label = None
         self.plugin_container = None
+        self.plugin_screen_objs = []
+        self.plugin_module = None
+        self.active_app_id = None
+
+        # Apps
+        self.apps = []
 
         # State
         self.current_screen = 'home'  # 'home' or 'plugin'
-        self.enabled_plugins = []
 
     def run(self):
         """Main entry point. Initializes everything and runs the event loop."""
@@ -209,8 +217,11 @@ class Launcher:
         except NameError:
             pass
 
-        # Filter plugins by machine config
-        self._filter_plugins()
+        global _launcher_instance
+        _launcher_instance = self
+
+        # Load apps (server-injected, machine config, or local manifests)
+        self._load_apps()
 
         # Create screens
         self._create_home_screen()
@@ -219,7 +230,7 @@ class Launcher:
         # Load home screen
         lv.screen_load(self.scr_home)
 
-        print("[launcher] Ready. Entering main loop.")
+        print(f"[launcher] Ready. {len(self.apps)} app(s). Entering main loop.")
         if self.sim_mode:
             print("[launcher] Simulator mode — host render loop drives LVGL.")
             return
@@ -284,31 +295,87 @@ class Launcher:
         except (OSError, AttributeError):
             print("[launcher] No machines directory found — all plugins enabled")
 
-    def _filter_plugins(self):
-        """Determine which plugins to show based on machine config."""
-        all_plugins = self.plugin_mgr.get_plugin_list()
+    def _load_apps(self):
+        """Build the app list from server injection, machine config, or local manifests."""
+        manifests = self._load_plugin_manifests()
+        self.apps = []
 
-        if self.machine_config and 'plugins' in self.machine_config:
-            enabled = self.machine_config['plugins']
-            self.enabled_plugins = [
-                (pid, manifest) for pid, manifest in all_plugins
-                if pid in enabled
-            ]
+        try:
+            server_apps = _SERVER_APPS
+        except NameError:
+            server_apps = None
+
+        config_apps = []
+        if self.machine_config:
+            config_apps = self.machine_config.get('apps') or []
+
+        source = server_apps if server_apps is not None else config_apps
+        print(f"[launcher] App source: {'server' if server_apps is not None else 'config' if source else 'none'}; count={len(source) if source else 0}")
+
+        if source:
+            for a in source:
+                pid = a.get('id') or a.get('plugin_id')
+                if not pid:
+                    continue
+                man = manifests.get(pid) or {}
+                entry = dict(man)
+                # Copy every non-null field the server provided (manifest +
+                # code), then let the machine config fill in name.
+                for k, v in a.items():
+                    if v is not None:
+                        entry[k] = v
+                entry['id'] = pid
+                entry['name'] = a.get('name') or man.get('name') or pid
+                entry['icon'] = a.get('icon') or man.get('icon')
+                entry['icon_data'] = a.get('icon_data') or man.get('icon_data')
+                entry['code'] = a.get('code') or man.get('code')
+                self.apps.append(entry)
         else:
-            # No config — show all plugins (setup mode)
-            self.enabled_plugins = all_plugins
+            for pid, man in manifests.items():
+                entry = dict(man)
+                entry['id'] = pid
+                self.apps.append(entry)
 
-        print(f"[launcher] Enabled plugins: {[p[0] for p in self.enabled_plugins]}")
+        print(f"[launcher] Apps: {[a.get('name') for a in self.apps]}")
+        print(f"[launcher] App code present: {[bool(a.get('code')) for a in self.apps]}")
+
+    def _load_plugin_manifests(self):
+        """Scan /fs1/plugins/*/manifest.json for plugin metadata."""
+        manifests = {}
+        if os is None:
+            return manifests
+        try:
+            entries = os.listdir('/fs1/plugins')
+        except (OSError, AttributeError):
+            return manifests
+        for name in entries:
+            if name.startswith('.'):
+                continue
+            try:
+                with open('/fs1/plugins/%s/manifest.json' % name) as f:
+                    m = json.load(f)
+                manifests[m.get('id', name)] = m
+            except (OSError, ValueError):
+                continue
+        return manifests
+
+    def _clock_positions(self, n):
+        """Angular icon positions (x, y offsets from center) — top, clockwise."""
+        pos = []
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            pos.append((round(ICON_RADIUS * math.sin(a)), round(-ICON_RADIUS * math.cos(a))))
+        return pos
 
     def _create_home_screen(self):
-        """Create the home screen with plugin icons."""
+        """Create the home screen with app icons in a clock formation."""
         self.scr_home = lv.obj()
         self.scr_home.set_style_bg_color(lv.color_hex(0x000000), 0)
         _clear_flag(self.scr_home, 'SCROLLABLE')
 
         # Machine name label in center
         self.machine_label = lv.label(self.scr_home)
-        machine_name = "Connecting..."
+        machine_name = "Knob"
         if self.machine_config:
             machine_name = self.machine_config.get('name', 'Knob')
         self.machine_label.set_text(machine_name)
@@ -316,45 +383,41 @@ class Launcher:
         self.machine_label.set_style_text_font(FONT_NAME, 0)
         self.machine_label.align(lv.ALIGN.CENTER, 0, 0)
 
-        # Create icon buttons
+        # Icon buttons in a clock formation
         self.home_icons = []
         self.home_labels = []
+        self.home_selected = 0
 
-        for i, (plugin_id, manifest) in enumerate(self.enabled_plugins):
-            if i >= 4:
-                break  # Max 4 icons on home screen
-
-            x_off, y_off = ICON_POSITIONS[i]
+        positions = self._clock_positions(len(self.apps))
+        for i, app in enumerate(self.apps):
+            x_off, y_off = positions[i]
 
             # Icon container (circle)
             icon_obj = lv.obj(self.scr_home)
-            icon_obj.set_size(70, 70)
-            icon_obj.set_style_radius(35, 0)
+            icon_obj.set_size(ICON_SIZE, ICON_SIZE)
+            icon_obj.set_style_radius(ICON_SIZE // 2, 0)
             icon_obj.set_style_border_width(2, 0)
             icon_obj.set_style_bg_opa(lv.OPA.TRANSP, 0)
             icon_obj.align(lv.ALIGN.CENTER, x_off, y_off)
             _clear_flag(icon_obj, 'SCROLLABLE')
             icon_obj.set_style_pad_all(0, 0)
 
-            # Icon symbol
+            # Temp icon: first letter of the app name (real icons come later)
             icon_label = lv.label(icon_obj)
-            icon_symbol = manifest.get('icon', 'default')
-            symbol_char = ICON_SYMBOLS.get(icon_symbol, ICON_SYMBOLS['default'])
-            if symbol_char:
-                icon_label.set_text(symbol_char)
+            app_name = app.get('name', '?')
+            icon_label.set_text(app_name[:1].upper() if app_name else '?')
             icon_label.set_style_text_font(FONT_ICON, 0)
-            icon_label.align(lv.ALIGN.CENTER, 0, -8)
+            icon_label.align(lv.ALIGN.CENTER, 0, -10)
 
-            # Plugin name below icon
+            # App name below icon
             name_label = lv.label(icon_obj)
-            name_label.set_text(manifest.get('name', plugin_id)[:8])
+            name_label.set_text(app_name[:8])
             name_label.set_style_text_font(FONT_SMALL, 0)
-            name_label.align(lv.ALIGN.CENTER, 0, 18)
+            name_label.align(lv.ALIGN.CENTER, 0, 20)
 
             self.home_icons.append(icon_obj)
             self.home_labels.append(name_label)
 
-        # Update initial selection
         self._update_home_selection()
 
     def _create_plugin_screen(self):
@@ -369,12 +432,6 @@ class Launcher:
     def _update_home_selection(self):
         """Update visual state of home screen icons."""
         for i, icon_obj in enumerate(self.home_icons):
-            if i >= len(self.enabled_plugins):
-                _add_flag(icon_obj, 'HIDDEN')
-                continue
-
-            _clear_flag(icon_obj, 'HIDDEN')
-
             if i == self.home_selected:
                 icon_obj.set_style_bg_color(lv.color_hex(0x007AFF), 0)
                 icon_obj.set_style_bg_opa(lv.OPA.COVER, 0)
@@ -385,33 +442,117 @@ class Launcher:
                 icon_obj.set_style_border_color(lv.color_hex(0x555555), 0)
                 self.home_labels[i].set_style_text_color(lv.color_hex(0x888888), 0)
 
+    def _new_plugin_screen(self):
+        """Fresh plugin screen (clears widgets from the previous app)."""
+        self.scr_plugin = lv.obj()
+        self.scr_plugin.set_style_bg_color(lv.color_hex(0x000000), 0)
+        _clear_flag(self.scr_plugin, 'SCROLLABLE')
+        self.plugin_container = self.scr_plugin
+        self.plugin_screen_objs = []
+
     def _enter_plugin(self, index):
-        """Enter a plugin from the home screen."""
-        if index >= len(self.enabled_plugins):
+        """Enter an app from the home screen — load and run its code."""
+        if index >= len(self.apps):
             return
 
-        plugin_id, manifest = self.enabled_plugins[index]
+        app = self.apps[index]
+        app_id = app.get('id', '')
+        print(f"[launcher] Launching app: {app.get('name')}")
 
-        # Activate plugin (creates LVGL widgets in plugin_container)
-        success = self.plugin_mgr.activate(plugin_id, self.plugin_container)
-        if not success:
-            print(f"[launcher] Failed to activate plugin: {plugin_id}")
-            return
+        self._new_plugin_screen()
+        self.active_app_id = app_id
+        self.plugin_module = None
+
+        code = app.get('code') or self._read_plugin_code(app_id)
+        print(f"[launcher] App '{app.get('name')}': code={'yes' if code else 'NO'} ({len(code)} chars)" if code else f"[launcher] App '{app.get('name')}': code=NO")
+        if code:
+            self._exec_app(app, code)
+        else:
+            self._show_sim_plugin_screen(app)
 
         self.current_screen = 'plugin'
 
+        # Tell the page which app is now running (drives the file bar)
+        print(json.dumps({"type": "app_loaded", "app": app_id, "name": app.get('name', app_id)}))
+
         # Notify PC
         if self.ws_client:
-            self.ws_client.send_app_switch(plugin_id)
+            self.ws_client.send_app_switch(app_id)
 
         # Switch to plugin screen
         lv.screen_load(self.scr_plugin)
 
+    def _read_plugin_code(self, app_id):
+        """Read a plugin's code from the device filesystem."""
+        if os is None:
+            return None
+        try:
+            with open('/fs1/plugins/%s/plugin.py' % app_id) as f:
+                return f.read()
+        except (OSError, AttributeError):
+            return None
+
+    def _exec_app(self, app, code):
+        """Execute a plugin's code and initialize it on the plugin screen."""
+        self.plugin_module = {
+            '_font': _font,
+            '_symbol': _symbol,
+        }
+        try:
+            exec(code, self.plugin_module)
+        except Exception as e:
+            print(f"[launcher] App code error: {e}")
+            self.plugin_module = None
+            return
+
+        hardware = {
+            'hid': self.hid,
+            'ws_client': self.ws_client,
+        }
+        try:
+            self.plugin_module['setup'](self.plugin_container, hardware)
+            if 'start' in self.plugin_module:
+                self.plugin_module['start']()
+        except Exception as e:
+            print(f"[launcher] App setup error: {e}")
+
+    def _show_sim_plugin_screen(self, app):
+        """Sim placeholder: app name centered, tap to return home."""
+        for o in self.plugin_screen_objs:
+            try:
+                o.delete()
+            except Exception:
+                pass
+        self.plugin_screen_objs = []
+
+        title = lv.label(self.scr_plugin)
+        title.set_text(app.get('name', 'App'))
+        title.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+        title.set_style_text_font(FONT_NAME, 0)
+        title.align(lv.ALIGN.CENTER, 0, -20)
+
+        hint = lv.label(self.scr_plugin)
+        hint.set_text("tap to return")
+        hint.set_style_text_color(lv.color_hex(0x555555), 0)
+        hint.set_style_text_font(FONT_SMALL, 0)
+        hint.align(lv.ALIGN.CENTER, 0, 10)
+
+        self.plugin_screen_objs = [title, hint]
+
     def _go_home(self):
         """Return to home screen from plugin."""
-        self.plugin_mgr.deactivate()
+        if self.plugin_module and 'stop' in self.plugin_module:
+            try:
+                self.plugin_module['stop']()
+            except Exception as e:
+                print(f"[launcher] App stop error: {e}")
+        closed_id = self.active_app_id
+        self.plugin_module = None
+        self.active_app_id = None
         self.current_screen = 'home'
         self._update_home_selection()
+        if closed_id:
+            print(json.dumps({"type": "app_closed", "app": closed_id}))
         lv.screen_load(self.scr_home)
 
     def _on_ws_message(self, msg):
@@ -425,17 +566,19 @@ class Launcher:
             print(f"[launcher] PC identified: {device} ({platform})")
             # Try to load matching machine config
             self._load_machine_config_for_device(device, platform)
-            self._filter_plugins()
-            # Recreate home screen with new plugins
+            self._load_apps()
+            # Recreate home screen with new apps
             self._create_home_screen()
             lv.screen_load(self.scr_home)
 
         elif msg_type == 'data_update':
             # Data update for a specific app
-            app = msg.get('app', '')
             data = msg.get('data', {})
-            if self.plugin_mgr.is_active():
-                self.plugin_mgr.on_data_update(data)
+            if self.plugin_module and 'on_data_update' in self.plugin_module:
+                try:
+                    self.plugin_module['on_data_update'](data)
+                except Exception as e:
+                    print(f"[launcher] App data update error: {e}")
 
     def _load_machine_config_for_device(self, device, platform):
         """Try to load a machine config matching the connected device."""
@@ -503,35 +646,49 @@ class Launcher:
     def _handle_encoder(self, delta):
         """Route encoder event to appropriate handler."""
         if self.current_screen == 'home':
-            # Navigate between icons
-            count = len(self.enabled_plugins)
+            # Navigate between icons (clock formation)
+            count = len(self.apps)
             if count > 0:
                 self.home_selected = (self.home_selected + delta) % count
                 self._update_home_selection()
         elif self.current_screen == 'plugin':
-            # Forward to active plugin
-            self.plugin_mgr.on_encoder(delta)
+            # Forward to active app
+            if self.plugin_module and 'on_encoder' in self.plugin_module:
+                try:
+                    self.plugin_module['on_encoder'](delta)
+                except Exception as e:
+                    print(f"[launcher] App encoder error: {e}")
 
     def _handle_button(self):
         """Route button press to appropriate handler."""
         if self.current_screen == 'home':
             self._enter_plugin(self.home_selected)
         elif self.current_screen == 'plugin':
-            self._go_home()
+            if self.plugin_module and 'on_button' in self.plugin_module:
+                try:
+                    self.plugin_module['on_button']()
+                except Exception as e:
+                    print(f"[launcher] App button error: {e}")
+            else:
+                self._go_home()
 
     def _handle_touch(self, x, y):
-        """Handle touch on home screen — check if an icon was tapped."""
-        # Simple hit testing against icon positions
-        for i, (plugin_id, manifest) in enumerate(self.enabled_plugins):
-            if i >= 4:
-                break
-            ix, iy = ICON_POSITIONS[i]
-            ix += 180  # Center offset
+        """Handle touch — tap an icon to run (home) or return (plugin screen)."""
+        if self.current_screen == 'plugin':
+            self._go_home()
+            return
+
+        positions = self._clock_positions(len(self.apps))
+        for i, app in enumerate(self.apps):
+            ix, iy = positions[i]
+            ix += 180  # Center offset for 360x360 display
             iy += 180
-            # Check if touch is within icon radius (35px)
+            # Check if touch is within icon radius
             dx = x - ix
             dy = y - iy
-            if dx * dx + dy * dy < 35 * 35:
+            if dx * dx + dy * dy < ICON_HIT * ICON_HIT:
+                self.home_selected = i
+                self._update_home_selection()
                 self._enter_plugin(i)
                 return
 
