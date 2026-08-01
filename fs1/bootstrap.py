@@ -22,6 +22,20 @@ except Exception:
     info['machine'] = 'simulator'
 
 info['location'] = 'unknown'
+try:
+    matches = [m.get('location', 'unknown') for m in _AVAILABLE_MACHINES
+               if m.get('guid') == info.get('machine_guid')]
+    if matches:
+        info['location'] = matches[0]
+except NameError:
+    pass
+
+info['server_version'] = 'unknown'
+try:
+    info['server_version'] = _SERVER_VERSION
+except NameError:
+    pass
+
 info['modules'] = []
 for m in ('machine', 'network', 'lvgl'):
     try:

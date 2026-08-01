@@ -9,8 +9,28 @@ Home screen shows plugin icons in a diamond/cross pattern on the
 """
 import gc
 import json
-import os
-from time import sleep_ms
+
+# os/time/utime are not all present in every MicroPython build — degrade
+# gracefully so the launcher still boots (imports must not kill the file).
+try:
+    import os
+except ImportError:
+    os = None
+
+try:
+    import utime
+except ImportError:
+    try:
+        import time as utime
+    except ImportError:
+        class _SimTime:
+            @staticmethod
+            def sleep_ms(ms):
+                pass
+        utime = _SimTime()
+
+def sleep_ms(ms):
+    utime.sleep_ms(ms)
 
 try:
     import lvgl as lv
@@ -29,15 +49,69 @@ ICON_POSITIONS = [
 ]
 
 # LVGL symbol mapping for common plugin icons
+def _symbol(*names):
+    if not LVGL_AVAILABLE:
+        return None
+    for name in names:
+        sym = getattr(lv, name, None)
+        if sym is not None:
+            return sym
+        short = name[len('SYMBOL_'):] if name.startswith('SYMBOL_') else name
+        try:
+            return getattr(lv.SYMBOL, short)
+        except (AttributeError, TypeError):
+            continue
+    return None
+
 ICON_SYMBOLS = {
-    'volume': lv.SYMBOL_VOLUME_FULL if LVGL_AVAILABLE else None,
-    'zoom': lv.SYMBOL_ZOOM_IN if LVGL_AVAILABLE else None,
-    'scroll': lv.SYMBOL_REFRESH if LVGL_AVAILABLE else None,
-    'brightness': lv.SYMBOL_BRIGHTNESS if LVGL_AVAILABLE else None,
-    'music': lv.SYMBOL_AUDIO if LVGL_AVAILABLE else None,
-    'settings': lv.SYMBOL_SETTINGS if LVGL_AVAILABLE else None,
-    'default': lv.SYMBOL_WIFI if LVGL_AVAILABLE else None,
+    'volume': _symbol('SYMBOL_AUDIO', 'SYMBOL_VOLUME_FULL'),
+    'zoom': _symbol('SYMBOL_EDIT', 'SYMBOL_ZOOM_IN'),
+    'scroll': _symbol('SYMBOL_SHUFFLE', 'SYMBOL_REFRESH'),
+    'brightness': _symbol('SYMBOL_AUDIO', 'SYMBOL_BRIGHTNESS'),
+    'music': _symbol('SYMBOL_AUDIO'),
+    'settings': _symbol('SYMBOL_SETTINGS'),
+    'default': _symbol('SYMBOL_WIFI'),
 }
+
+# Fonts — prefer exact, fall back to whatever the build ships
+def _font(*names):
+    if not LVGL_AVAILABLE:
+        return None
+    for n in names:
+        f = getattr(lv, n, None)
+        if f is not None:
+            return f
+    return None
+
+FONT_NAME = _font('font_montserrat_14', 'font_montserrat_16', 'font_montserrat_24')
+FONT_ICON = _font('font_montserrat_28', 'font_montserrat_24', 'font_montserrat_16', 'font_montserrat_14')
+FONT_SMALL = _font('font_montserrat_10', 'font_montserrat_14', 'font_montserrat_16')
+
+# LVGL v9 object flags — resolve via binding enum if present, else raw values.
+_OBJ_FLAGS = {'HIDDEN': 0x000001, 'SCROLLABLE': 0x000010}
+
+def _obj_flag(name):
+    if LVGL_AVAILABLE:
+        try:
+            return lv.OBJ_FLAG[name]
+        except Exception:
+            try:
+                return getattr(lv.OBJ_FLAG, name)
+            except (AttributeError, TypeError):
+                pass
+    return _OBJ_FLAGS.get(name)
+
+
+def _clear_flag(obj, name):
+    flag = _obj_flag(name)
+    if flag is not None and LVGL_AVAILABLE and hasattr(lv, 'OBJ_FLAG'):
+        obj.clear_flag(flag)
+
+
+def _add_flag(obj, name):
+    flag = _obj_flag(name)
+    if flag is not None and LVGL_AVAILABLE and hasattr(lv, 'OBJ_FLAG'):
+        obj.add_flag(flag)
 
 # Animation types
 ANIM_NONE = 'none'
@@ -72,8 +146,23 @@ class Launcher:
     def run(self):
         """Main entry point. Initializes everything and runs the event loop."""
         # Initialize hardware
-        from hardware import Hardware
-        self.hardware = Hardware()
+        try:
+            from hardware import Hardware
+            self.hardware = Hardware()
+            self.sim_mode = False
+        except ImportError:
+            class _SimHardware:
+                encoder = None
+                touch = None
+                def init_display(self):
+                    pass
+                def init_touch(self):
+                    return None
+                def init_encoder(self):
+                    pass
+            self.hardware = _SimHardware()
+            self.sim_mode = True
+            print("[launcher] Simulator mode — hardware module not available")
 
         if not LVGL_AVAILABLE:
             print("[launcher] LVGL not available. Exiting.")
@@ -89,8 +178,36 @@ class Launcher:
         self._load_machine_config()
 
         # Initialize plugin manager
-        from plugin_manager import PluginManager
-        self.plugin_mgr = PluginManager(self.hardware)
+        try:
+            from plugin_manager import PluginManager
+            self.plugin_mgr = PluginManager(self.hardware)
+        except ImportError:
+            class _SimPluginManager:
+                def __init__(self, hardware):
+                    self.hardware = hardware
+                    self._active = False
+                def get_plugin_list(self):
+                    return []
+                def activate(self, plugin_id, container):
+                    return False
+                def deactivate(self):
+                    self._active = False
+                def is_active(self):
+                    return self._active
+                def on_encoder(self, delta):
+                    pass
+                def on_data_update(self, data):
+                    pass
+            self.plugin_mgr = _SimPluginManager(self.hardware)
+            print("[launcher] Simulator mode — plugin_manager module not available")
+
+        # In the sim, the host already sent the machine config before the launcher
+        try:
+            if self.machine_config is None and _MACHINE_CONFIG:
+                self.machine_config = _MACHINE_CONFIG
+                print(f"[launcher] Using config from server: {self.machine_config.get('name')}")
+        except NameError:
+            pass
 
         # Filter plugins by machine config
         self._filter_plugins()
@@ -103,6 +220,9 @@ class Launcher:
         lv.screen_load(self.scr_home)
 
         print("[launcher] Ready. Entering main loop.")
+        if self.sim_mode:
+            print("[launcher] Simulator mode — host render loop drives LVGL.")
+            return
         self._main_loop()
 
     def _init_display(self):
@@ -114,8 +234,8 @@ class Launcher:
         touch = self.hardware.init_touch()
 
         indev = lv.indev_create()
-        indev.type = lv.INDEV_TYPE.POINTER
-        indev.read_cb = self._touch_cb
+        indev.set_type(lv.INDEV_TYPE.POINTER)
+        indev.set_read_cb(self._touch_cb)
 
     def _init_encoder(self):
         """Initialize encoder (polled from main loop, NOT LVGL indev)."""
@@ -154,14 +274,14 @@ class Launcher:
     def _load_machine_config(self):
         """Load machine config from fs1/machines/."""
         try:
-            machines = os.listdir('/fs1/machines')
+            machines = os.listdir('/fs1/machines') if os else []
             for fname in machines:
                 if fname.endswith('.json'):
                     with open(f'/fs1/machines/{fname}', 'r') as f:
                         self.machine_config = json.load(f)
                     print(f"[launcher] Loaded machine: {self.machine_config.get('name', fname)}")
                     return
-        except OSError:
+        except (OSError, AttributeError):
             print("[launcher] No machines directory found — all plugins enabled")
 
     def _filter_plugins(self):
@@ -184,7 +304,7 @@ class Launcher:
         """Create the home screen with plugin icons."""
         self.scr_home = lv.obj()
         self.scr_home.set_style_bg_color(lv.color_hex(0x000000), 0)
-        self.scr_home.clear_flag(lv.OBJ_FLAG.SCROLLABLE)
+        _clear_flag(self.scr_home, 'SCROLLABLE')
 
         # Machine name label in center
         self.machine_label = lv.label(self.scr_home)
@@ -193,7 +313,7 @@ class Launcher:
             machine_name = self.machine_config.get('name', 'Knob')
         self.machine_label.set_text(machine_name)
         self.machine_label.set_style_text_color(lv.color_hex(0x666666), 0)
-        self.machine_label.set_style_text_font(lv.font_montserrat_14, 0)
+        self.machine_label.set_style_text_font(FONT_NAME, 0)
         self.machine_label.align(lv.ALIGN.CENTER, 0, 0)
 
         # Create icon buttons
@@ -213,7 +333,7 @@ class Launcher:
             icon_obj.set_style_border_width(2, 0)
             icon_obj.set_style_bg_opa(lv.OPA.TRANSP, 0)
             icon_obj.align(lv.ALIGN.CENTER, x_off, y_off)
-            icon_obj.clear_flag(lv.OBJ_FLAG.SCROLLABLE)
+            _clear_flag(icon_obj, 'SCROLLABLE')
             icon_obj.set_style_pad_all(0, 0)
 
             # Icon symbol
@@ -222,13 +342,13 @@ class Launcher:
             symbol_char = ICON_SYMBOLS.get(icon_symbol, ICON_SYMBOLS['default'])
             if symbol_char:
                 icon_label.set_text(symbol_char)
-            icon_label.set_style_text_font(lv.font_montserrat_28, 0)
+            icon_label.set_style_text_font(FONT_ICON, 0)
             icon_label.align(lv.ALIGN.CENTER, 0, -8)
 
             # Plugin name below icon
             name_label = lv.label(icon_obj)
             name_label.set_text(manifest.get('name', plugin_id)[:8])
-            name_label.set_style_text_font(lv.font_montserrat_10, 0)
+            name_label.set_style_text_font(FONT_SMALL, 0)
             name_label.align(lv.ALIGN.CENTER, 0, 18)
 
             self.home_icons.append(icon_obj)
@@ -241,7 +361,7 @@ class Launcher:
         """Create the plugin screen (shared container for all plugins)."""
         self.scr_plugin = lv.obj()
         self.scr_plugin.set_style_bg_color(lv.color_hex(0x000000), 0)
-        self.scr_plugin.clear_flag(lv.OBJ_FLAG.SCROLLABLE)
+        _clear_flag(self.scr_plugin, 'SCROLLABLE')
 
         # Plugin container (full screen, plugins add widgets to this)
         self.plugin_container = self.scr_plugin
@@ -250,10 +370,10 @@ class Launcher:
         """Update visual state of home screen icons."""
         for i, icon_obj in enumerate(self.home_icons):
             if i >= len(self.enabled_plugins):
-                icon_obj.add_flag(lv.OBJ_FLAG.HIDDEN)
+                _add_flag(icon_obj, 'HIDDEN')
                 continue
 
-            icon_obj.clear_flag(lv.OBJ_FLAG.HIDDEN)
+            _clear_flag(icon_obj, 'HIDDEN')
 
             if i == self.home_selected:
                 icon_obj.set_style_bg_color(lv.color_hex(0x007AFF), 0)
@@ -320,7 +440,7 @@ class Launcher:
     def _load_machine_config_for_device(self, device, platform):
         """Try to load a machine config matching the connected device."""
         try:
-            machines = os.listdir('/fs1/machines')
+            machines = os.listdir('/fs1/machines') if os else []
             for fname in machines:
                 if fname.endswith('.json'):
                     with open(f'/fs1/machines/{fname}', 'r') as f:
@@ -331,7 +451,7 @@ class Launcher:
                         self.machine_config = config
                         print(f"[launcher] Matched machine: {config.get('name', fname)}")
                         return
-        except OSError:
+        except (OSError, AttributeError):
             pass
 
     def _main_loop(self):
@@ -441,3 +561,7 @@ class Launcher:
             x, y,
             lv.INDEV_STATE.PRESSED if pressed else lv.INDEV_STATE.RELEASED
         )
+
+
+if __name__ == '__main__':
+    Launcher().run()

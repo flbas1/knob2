@@ -67,7 +67,9 @@ class Bridge:
             while not stop.is_set():
                 msg, b = self._recv_ws_frame(src, b)
                 if msg is None:
+                    print(f"[bridge] {name}: socket closed")
                     break
+                print(f"[bridge] {name} → {msg[:120]}")
                 self._send_ws_text(dst, msg)
             stop.set()
 
@@ -93,6 +95,7 @@ class Bridge:
                 if not c: raise ConnectionError()
                 resp += c
             assert b"101" in resp
+            s.settimeout(None)
             print(f"[bridge] Connected to server at {SERVER_HOST}:{SERVER_PORT}")
             return s
         except Exception as e:
@@ -219,6 +222,10 @@ class HTTPHandler(http.server.SimpleHTTPRequestHandler):
         print(f"[http] {args[0]}")
 
 
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
 def main():
     parser = argparse.ArgumentParser(description="testKnob — browser simulator bridge")
     parser.add_argument("--http-port", type=int, default=8080)
@@ -236,7 +243,7 @@ def main():
 
     print(f"[testKnob] Serving test website at http://localhost:{args.http_port}")
     print(f"[testKnob] Bridging to server at {SERVER_HOST}:{SERVER_PORT}")
-    with socketserver.TCPServer(("0.0.0.0", args.http_port), HTTPHandler) as httpd:
+    with ReuseTCPServer(("0.0.0.0", args.http_port), HTTPHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

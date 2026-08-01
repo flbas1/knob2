@@ -7,6 +7,7 @@ Routes app commands (volume, brightness, zoom, scroll) to system actions.
 import argparse, fnmatch, json, os, socket, sys, threading, hashlib, base64, time
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+SERVER_VERSION = "0.1.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MACHINES_DIR = os.path.join(SCRIPT_DIR, 'machines')
 BOOTSTRAP_PATH = os.path.join(SCRIPT_DIR, 'bootstrap.py')
@@ -94,13 +95,17 @@ class KnobServer:
 
         machines = self._load_machine_list()
         if machines:
-            preamble = "_AVAILABLE_MACHINES = " + json.dumps(machines) + "\n"
+            preamble = (
+                f"_SERVER_VERSION = \"{SERVER_VERSION}\"\n"
+                "_AVAILABLE_MACHINES = " + json.dumps(machines) + "\n"
+            )
             boot_code = preamble + boot_code
-            print(f"[server] Injected {len(machines)} machines into bootstrap")
+            print(f"[server] Injected {len(machines)} machines (v{SERVER_VERSION}) into bootstrap")
 
         print("[server] Sending bootstrap.py...")
         self._send_ws_text(sock, json.dumps({
             "type": "execute",
+            "file": "bootstrap.py",
             "code": boot_code,
             "machines": machines
         }))
@@ -116,7 +121,8 @@ class KnobServer:
             if d.get("type") == "bootstrap_response":
                 info = d.get("data", {})
                 guid = info.get("machine_guid", "")
-                print(f"[server] Knob: machine={info.get('machine')} guid={guid}")
+                print(f"[server] Knob: machine={info.get('machine')} guid={guid} "
+                      f"version={info.get('server_version')} location={info.get('location')}")
                 break
 
         config = self._match_machine(guid)
@@ -143,7 +149,7 @@ class KnobServer:
         except OSError:
             print("[server] launcher.py not found"); return None
         print("[server] Sending launcher.py...")
-        self._send_ws_text(sock, json.dumps({"type": "execute", "code": launch_code}))
+        self._send_ws_text(sock, json.dumps({"type": "execute", "file": "launcher.py", "code": launch_code}))
         return buf
 
     def _match_machine(self, guid):

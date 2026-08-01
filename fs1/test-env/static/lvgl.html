@@ -15,10 +15,15 @@
 
 <script src="wasm_file_api.js"></script>
 <script>
+window.parent.postMessage({ type: 'iframe_loaded', ts: Date.now() }, '*');
+window.addEventListener('beforeunload', function() {
+  window.parent.postMessage({ type: 'iframe_unload', ts: Date.now() }, '*');
+});
 // Set up Module before loading micropython.js
 var canvas = document.getElementById('canvas');
 Module = {
   canvas: canvas,
+  locateFile: function(f) { return f + '?v=2'; },
   print: function(text) { console.log('MP:', text); window.parent.postMessage({ type: 'stdout', stdout: text + '\n' }, '*'); },
   printErr: function(text) { console.error('MP ERR:', text); window.parent.postMessage({ type: 'stderr', stderr: text + '\n' }, '*'); },
   onRuntimeInitialized: function() {
@@ -30,7 +35,7 @@ Module = {
   }
 };
 </script>
-<script src="micropython.js"></script>
+<script src="micropython.js?v=2"></script>
 <script>
 // MicroPython sleep needs this for browser async sleep support
 window.do_sleep_with_intr = function(ms, cb) { setTimeout(function() { cb(0); }, ms); };
@@ -65,15 +70,17 @@ async function mpExecNext() {
   mpExecNext();
 }
 
-// Queue messages that arrive before mp_js_do_str is ready
+// Queue messages that arrive before the interpreter is initialized
 var mp_pending_messages = [];
+var mp_interp_ready = false;
 window.addEventListener('message', function(ev) {
   if (ev.data && ev.data.execute) {
-    if (typeof mp_js_do_str !== 'undefined') {
+    if (mp_interp_ready) {
       mpEnqueue(ev.data.execute);
     } else {
       mp_pending_messages.push(ev.data.execute);
     }
+    window.parent.postMessage({ type: 'code_received' }, '*');
   }
 });
 
@@ -106,6 +113,7 @@ function startKnobSimulator() {
   mp_js_do_str(
     'import lvgl as lv\nlv.init()\ndisp = lv.sdl_window_create(480, 320)\nlv.sdl_window_set_title(disp, "Knob Simulator")\ndef on_touch(x, y, pressed):\n    pass\nprint("Ready")'
   ).then(function() {
+    mp_interp_ready = true;
     window.parent.postMessage({ type: 'mp_ready' }, '*');
     // Flush any messages that arrived before mp_js_do_str was ready
     while (mp_pending_messages.length > 0) {

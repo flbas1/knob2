@@ -38,10 +38,16 @@
         }
         #mp-frame { width: 100%; height: 100%; border: none; }
         .side-panel {
-            width: 380px; background: #16213e;
+            flex: 0 0 auto;
+            width: 520px; background: #16213e;
             border-left: 1px solid #0f3460;
             display: flex; flex-direction: column; overflow: hidden;
         }
+        .resize-handle {
+            width: 5px; cursor: col-resize; flex-shrink: 0;
+            background: #0f3460; transition: background 0.15s;
+        }
+        .resize-handle:hover, .resize-handle.active { background: #e94560; }
         .panel-section { padding: 15px; border-bottom: 1px solid #0f3460; }
         .panel-section h3 { font-size: 12px; color: #e94560; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
         .guid-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
@@ -118,6 +124,17 @@
         .ws-log .sent { color: #3fb950; }
         .ws-log .recv { color: #58a6ff; }
         .help-text { font-size: 11px; color: #666; margin-top: 8px; text-align: center; }
+        .file-bar {
+            display: flex; align-items: center; gap: 10px;
+            background: #0d1117; border-top: 1px solid #30363d;
+            padding: 7px 15px; font-size: 12px; color: #8b949e;
+        }
+        .file-bar input {
+            flex: 1; background: #161b22; border: 1px solid #30363d;
+            color: #58a6ff; font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px; padding: 4px 8px; border-radius: 4px;
+            outline: none; cursor: default;
+        }
     </style>
 </head>
 <body>
@@ -131,12 +148,14 @@
     <div class="main">
         <div class="sim-panel">
             <div class="sim-frame" id="sim-frame">
-                <iframe id="mp-frame" src="static/lvgl.html?v=3"></iframe>
+                <iframe id="mp-frame" src="static/lvgl.html?v=6"></iframe>
             </div>
             <p class="help-text">Click display to touch · Arrow keys to rotate encoder · Ctrl+Enter to run code</p>
         </div>
 
-        <div class="side-panel">
+        <div class="resize-handle" id="resize-handle"></div>
+
+        <div class="side-panel" id="side-panel">
             <div class="panel-section">
                 <h3>Knob Identity</h3>
                 <div class="guid-row">
@@ -180,6 +199,11 @@
 
             <div class="console" id="console"></div>
         </div>
+    </div>
+
+    <div class="file-bar">
+        <span>Running:</span>
+        <input type="text" id="current-file" readonly value="—" placeholder="—">
     </div>
 
 <script>
@@ -248,13 +272,20 @@ function connectWs() {
         }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
         wsConnected = false;
         document.getElementById('ws-status').classList.remove('connected');
         document.getElementById('ws-status-text').textContent = 'Disconnected';
-        log('WebSocket disconnected — retrying in 3s...', 'error');
+        log(`WebSocket closed (code=${e.code} reason='${e.reason}') — retrying in 3s...`, 'error');
         setTimeout(connectWs, 3000);
     };
+
+    window.addEventListener('beforeunload', () => {
+        console.log('[sim] PAGE unloading');
+    });
+    document.addEventListener('visibilitychange', () => {
+        console.log('[sim] visibility:', document.visibilityState);
+    });
 
     ws.onerror = () => log('WebSocket error', 'error');
 }
@@ -293,6 +324,7 @@ function handleWsMsg(msg) {
     }
     if (msg.type === 'execute') {
         window._bootstrapped = true;
+        $('current-file').value = msg.file || 'unknown';
         if (window._bootstrapTimer) {
             clearTimeout(window._bootstrapTimer);
             window._bootstrapTimer = undefined;
@@ -303,9 +335,14 @@ function handleWsMsg(msg) {
             code = `_MACHINE_GUID = "${guidOverride}"\n` + code;
         }
         log(`Executing code from server (${code.length} chars)`, 'info');
+        codeEditor.value = code;
         runInSimulator(code);
+        if (!mpFrameReady) {
+            window._lastServerCode = code;
+        }
     } else if (msg.type === 'config') {
         const config = msg.config;
+        $('current-file').value = `config — ${config.name || config.machine_guid || ''}`;
         log(`Config received: ${JSON.stringify(config).slice(0, 80)}...`, 'info');
         runInSimulator(`
 import json
@@ -331,6 +368,12 @@ except Exception as e:
 // =============================================
 
 const mpFrame = $('mp-frame');
+let mpFrameLoads = 0;
+let mpFrameReady = false;
+mpFrame.addEventListener('load', () => {
+    mpFrameLoads++;
+    log(`Simulator iframe loaded (${mpFrameLoads} load event(s))`, 'info');
+});
 
 function runInSimulator(code) {
     if (mpFrame && mpFrame.contentWindow) {
@@ -343,11 +386,26 @@ function runInSimulator(code) {
 
 // Listen for messages from the MicroPython iframe
 window.addEventListener('message', (ev) => {
+    if (ev.data && ev.data.type === 'iframe_loaded') {
+        mpFrameReady = true;
+        log(`Iframe loaded (ts=${ev.data.ts})`, 'info');
+    }
+    if (ev.data && ev.data.type === 'code_received') {
+        window._lastServerCode = null;
+    }
+    if (ev.data && ev.data.type === 'iframe_unload') {
+        log(`Iframe UNLOADING (ts=${ev.data.ts}) — parent still alive`, 'error');
+    }
     if (ev.data && ev.data.type === 'mp_ready') {
         mpReady = true;
         $('mp-status').textContent = 'MicroPython: Ready';
         $('mp-status').style.color = '#4caf50';
         log('MicroPython WASM loaded', 'ok');
+        if (window._lastServerCode) {
+            log('Re-sending server code (was dropped pre-iframe-load)', 'info');
+            runInSimulator(window._lastServerCode);
+            window._lastServerCode = null;
+        }
         // Fallback: if no bootstrap from server within 2s, load default code
         if (window._bootstrapTimer === undefined) {
             window._bootstrapTimer = setTimeout(() => {
@@ -544,6 +602,35 @@ $('btn-ccw').addEventListener('click', () => {
 
 $('btn-press').addEventListener('click', sendButton);
 
+// Resizable right panel (not persisted)
+const resizeHandle = $('resize-handle');
+const sidePanel = $('side-panel');
+let resizing = false;
+const MIN_PANEL = 340;
+const MAX_PANEL_FRAC = 0.85;
+
+resizeHandle.addEventListener('mousedown', (e) => {
+    resizing = true;
+    resizeHandle.classList.add('active');
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const max = window.innerWidth * MAX_PANEL_FRAC;
+    const width = Math.max(MIN_PANEL, Math.min(max, window.innerWidth - e.clientX));
+    sidePanel.style.width = width + 'px';
+});
+
+document.addEventListener('mouseup', () => {
+    if (resizing) {
+        resizing = false;
+        resizeHandle.classList.remove('active');
+        document.body.style.userSelect = '';
+    }
+});
+
 
 
 // Keyboard
@@ -570,6 +657,7 @@ document.addEventListener('keydown', (e) => {
 $('btn-run').addEventListener('click', () => {
     const code = codeEditor.value;
     if (code.trim()) {
+        $('current-file').value = 'editor — custom code';
         log('Running code...', 'info');
         runInSimulator(code);
     }
