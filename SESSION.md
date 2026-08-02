@@ -4,7 +4,7 @@ Saved session state for continuity between work sessions.
 
 ## Objective
 - Finish the Smart Knob system: PC server (`fs1/server.py`) drives bootstrap → config → launcher with literal-GUID machine configs; browser sim bridged via `testKnob.py`.
-- **Current milestone: apps load + execute on select, with visible proof on the page.** Selecting Volume in the sim runs its `plugin.py` (harness + browser console verify `[volume] Active`). User complained the page gave no visual proof ("bottom left says launcher — not volume; apps look visually similar") → added `app_loaded`/`app_closed` JSON messages from the launcher that drive the `#current-file` bar to `volume.py — running` and log "App loaded: Volume".
+- **Current milestone: apps fetched on demand.** launcher.py ships metadata-only (`_SERVER_APPS` without `code`); selecting an app sends `app_request` → server replies with `_exec_plugin('<id>', <source>)` wrapped in a normal `execute` message — launcher.py stays small even with ~20 apps. Volume round-trip still works: app `on_encoder` → `send_plugin_input("volume","set",v)` → server → `set_volume` (real OS) → read back → `data_update` → launcher `on_data_update` → arc snaps to the PC's actual value.
 
 ## Latest milestone — apps in a clock formation (verified in harness)
 - App source of truth = the machine config's `apps` list (from `_MACHINE_CONFIG`), merged with `/fs1/plugins/*/manifest.json` metadata. Server injects the merged list into the launcher as `_SERVER_APPS` (server.py `_build_app_list` reads machine `apps` + `_load_plugin_manifests` from disk); launcher prefers `_SERVER_APPS`, falls back to `_MACHINE_CONFIG['apps']`, then to scanning `/fs1/plugins`.
@@ -23,6 +23,22 @@ Saved session state for continuity between work sessions.
 - **Running-app visibility (new):** launcher prints `{"type":"app_loaded","app":"volume","name":"Volume"}` after a successful enter (also after the no-code placeholder screen) and `{"type":"app_closed","app":"volume"}` in `_go_home`. `index.html` stdout handler parses these: `app_loaded` sets the `#current-file` bar to `<app>.py — running` + logs "App loaded: <name>" (ok color); `app_closed` resets it to `launcher.py`. They are NOT forwarded to the bridge WS (server.py `_route_message` still handles both for clean logging: "App running: …" / "App stopped: …").
 - Harness-verified both messages: enter Volume → `{"app":"volume","name":"Volume","type":"app_loaded"}` → tap return → `[volume] Stopped` + `{"app":"volume","type":"app_closed"}` → home.
 - Note: entering an app with an `on_button` (e.g. Volume = mute toggle) means the button does NOT return home; tapping the plugin screen does (`_handle_touch` → `_go_home`).
+- **Volume round-trip (new):** 
+  - Sim WS transport: plugins call `_ws_client.send_plugin_input/send_data_request/send_app_switch` (interface from `fs2/lib/ws_client.py` → `type:'plugin_input'/'data_request'/'app_switch'`). In the sim, `from ws_client import WSClient` fails, so launcher `_init_websocket` now falls back to `_SimWSClient` which prints the same JSON to stdout; the browser's existing stdout-JSON relay forwards them to the bridge → server. Real hardware keeps the real `WSClient`.
+  - Protocol fix: `server._route_message` now routes `plugin_input` (what the knob actually sends) as well as the legacy `action`; also handles `app_switch`.
+  - PC answers: `KnobClient` volume `set`/`mute` now read back `get_volume()` and send `data_update{app:'volume',data:{value}}`; `_handle_data_request('volume')` answers with current volume. `_send_volume_update()` falls back to the last requested value when the OS can't report (e.g. container with no `amixer`) so the loop still visibly works.
+  - Linux `get_volume` made robust (returns `None` on missing amixer/failed parse instead of 0).
+  - Volume plugin `start()` now `send_data_request`s so the arc opens at the real PC volume; `on_data_update` already applies it.
+  - Launcher gained module-level `on_data_update(data)` → `_launcher_instance._on_ws_message(...)` so the browser's `data_update` runInSimulator path reaches the active plugin (was a swallowed NameError).
+  - Browser no longer sends direct `encoder`/`button` messages to the server (they were "Unknown message" noise and don't exist on hardware — the plugin's own WS sends are the channel).
+- Harness-verified sim side: enter Volume → `data_request` → `[volume] Active` → `app_loaded` + `app_switch` → `on_encoder(3)` → `{"type":"plugin_input","app":"volume","value":59,"action":"set"}` → `on_data_update({'value':55})` → plugin `_current_value` 55.
+- Verified server side (socketpair test): `plugin_input volume set=63` → `set_volume(63)` + sends `{"type":"data_update","app":"volume","data":{"value":63}}`; `data_request volume` replies likewise. Container `LinuxVolumeControl.get_volume()` returns `None` (no audio) → server echoes requested value.
+- **Apps fetched on demand (new) — launcher.py no longer embeds app code.** Server `_build_app_list` returns metadata only (id/name/icon/icon_data/version/settings from machine config + manifests, no `code`). Flow: select app → launcher `_enter_plugin` shows a "loading…" screen, sets `pending_app_id`, sends `app_request {app}` via the sim shim → server `_route_message('app_request')` reads `fs1/plugins/<id>/plugin.py` and sends a normal `execute {file:'<id>.py', code: "_exec_plugin('<id>', <repr of source>)\n"}` (or `_exec_plugin('<id>', None)` if no file → placeholder) → browser's `execute` handler runs it as-is (only bootstrap is gated, only launcher gets the GUID override) → top-level `_exec_plugin` hands it to the RUNNING launcher (`_launcher_instance._activate_app(app_id, code)`), so no re-exec-at-top-level of a standalone plugin. Log now reads: `App requested: volume` → `Sent app code: volume.py (4040 chars)` → `App switched: volume`.
+  - `_activate_app` only accepts when `pending_app_id == app_id` (cleared on success and in `_go_home`) so a code delivery that arrives after the user went home is ignored.
+  - `_enter_plugin`/`_activate_app` split; `_exec_app` unchanged (execs into a fresh plugin module with `_font`/`_symbol`).
+  - `fs2/lib/ws_client.py` gained `send_app_request` (+ `MSG_APP_REQUEST`) for hardware parity; sim `_SimWSClient` mirrors it.
+  - MicroPython gotcha found here: **`next((x for x in it if cond), default)` raises `TypeError: argument num/types mismatch` in this build** — the app-by-id lookup uses a plain loop instead.
+  - Real hardware fallback unchanged: `_enter_plugin` still tries embedded code / `/fs1/plugins/<id>/plugin.py` before requesting from the server.
 
 ## Important Details
 - Knob-as-host framing (user): "the knob is the host — it controls the pc. the pc is the client… a very symbiotic relationship."
@@ -75,29 +91,31 @@ Saved session state for continuity between work sessions.
 - Commit `604bd5e2` pushed. Legacy constants in `fs1/pc/knob_client/main.py` (lines 26–32) removed.
 
 ### Active / Pending
-- Server restarted (pid 228377 → restarted with `app_loaded`/`app_closed` handling) and listening on :8765. User hard-refreshes `http://localhost:8080` → pick machine → Start Bootstrap.
-- Confirm in browser: tap/click Volume → file bar flips to `volume.py — running`, console logs `App loaded: Volume`; the arc UI shows (that's the proof apps run); spin encoder → % changes; tap canvas → bar back to `launcher.py`, `App closed: volume`.
+- Server restarted with on-demand app delivery, listening on :8765. User hard-refreshes `http://localhost:8080` → Start Bootstrap.
+- Confirm in browser: tap Volume → console shows `app_request` then server.log shows `Sent app code: volume.py` then `App switched: volume`; file bar shows `volume.py`; arc renders (container echoes volume, so value holds).
 - Real app icons: source PNGs → base64 into each plugin `manifest.json` `icon_data` field (scaffold reads it). Rendering needs a PNG decode path in the sim build (none today) — alternatives: LVGL C-image `.c` files, or a sprite font.
 - Future: re-bootstrap mid-connection (server currently one-shot per connection; changing machine needs a page reload).
 - Sim diagnostics still in place (WS close codes, iframe load/unload postMessage events) — removable once testing settles.
-- Uncommitted: this milestone's launcher/server/lvgl.html/index.html changes + SESSION.md.
+- Uncommitted: this milestone's launcher/server/pc_client/volume plugin/index.html/fs2 ws_client changes + SESSION.md.
 
 ### Blocked
-- (none) — apps execute inside the sim and the launcher now reports which app is running; awaiting live-browser confirmation of the file-bar/`App loaded` indicator after a hard refresh.
+- (none) — on-demand flow verified end-to-end in harness (metadata-only list → `app_request` → server wrapper → `_exec_plugin` → activate → late-delivery guard) and server socketpair test; awaiting live-browser confirmation after a hard refresh.
 
 ## Next Move
-1. User hard-refreshes the sim and presses Start Bootstrap after picking a machine.
-2. Confirm: tap Volume → file bar `volume.py — running` + console `App loaded: Volume` + arc UI appears; encoder changes %, tap canvas → bar `launcher.py` + `App closed: volume`.
-3. If clean, commit ("apps load + execute visibly: launcher emits app_loaded/app_closed; page file-bar + log shows the running app").
-4. Future: real base64 PNG icons (needs a decode path), mid-connection re-bootstrap, wire plugin.py HID/WS effects (volume actually changing system volume in sim isn't possible — the arc + routing is the deliverable).
+1. User hard-refreshes the sim and presses Start Bootstrap.
+2. Confirm: tap Volume → file bar `volume.py`; server.log: `App requested: volume` → `Sent app code: volume.py (4040 chars)` → `App switched: volume`; arc renders; spin encoder → `plugin_input set=N` + `data_update` reply; tap display → back home.
+3. If clean, commit ("apps fetched on demand: server sends one plugin at a time via _exec_plugin; launcher stays small for ~20 apps").
+4. Future: real base64 PNG icons (needs a decode path), mid-connection re-bootstrap, real-PC volume test (osascript/amixer), brightness data_request→HA already works via same shim.
 
 ## Relevant Files
 - `/workspaces/knob-controller/fs1/test-env/static/lvgl.html`: WASM iframe; `mp_interp_ready` gate + queue flush; `code_received` ACK; `micropython.js?v=2` + `locateFile ?v=2`; 16ms `lv.timer_handler()` render pump; `on_touch`; square `lv.sdl_window_create(360, 360)`.
 - `/workspaces/knob-controller/fs1/test-env/index.html`: resizable right panel; editor mirrors server code; `_lastServerCode` resend-on-`mp_ready`; `code_received` clears; `#current-file` bar (now also driven by `app_loaded`/`app_closed`); `?v=7` iframe.
 - `/workspaces/knob-controller/fs1/test-env/testKnob.py`: transparent bridge (:8080 + :8766 → :8765); `s.settimeout(None)` after handshake; ReuseTCPServer.
-- `/workspaces/knob-controller/fs1/server.py`: `SERVER_VERSION = "0.1.0"`; preamble injection; `_build_app_list` merges machine `apps` + plugin manifests → injects `_SERVER_APPS` into launcher; `_route_message` handles `app_loaded`/`app_closed`.
+- `/workspaces/knob-controller/fs1/server.py`: `SERVER_VERSION = "0.1.0"`; preamble injection; `_build_app_list` metadata-only (no embedded code); `_route_message` handles `plugin_input`/`action`/`app_switch`/`app_request`/`data_request`/`app_loaded`/`app_closed`; `app_request` sends `_exec_plugin('<id>', <src>)` wrapper.
+- `/workspaces/knob-controller/fs1/pc/knob_client/main.py`: `_handle_plugin_input` volume set/mute now reply with `data_update`; `_handle_data_request('volume')` answers current volume; `_send_volume_update` (falls back to last requested when OS can't report); robust Linux `get_volume` (None on failure).
+- `/workspaces/knob-controller/fs2/lib/ws_client.py`: adds `send_app_request` + `MSG_APP_REQUEST` (hardware parity with the sim shim).
 - `/workspaces/knob-controller/fs1/bootstrap.py`: resolves `location` from `_AVAILABLE_MACHINES` by GUID; reports `server_version`.
-- `/workspaces/knob-controller/fs1/launcher.py`: sim-compatible + executable launcher; `_load_apps`/`_load_plugin_manifests`; `_clock_positions` clock formation; first-letter temp icons; module-level `on_encoder`/`on_button`/`on_touch` → `_launcher_instance`; `_enter_plugin` execs embedded `code` (+ `_font`/`_symbol` helpers) and emits `app_loaded`; `_go_home` emits `app_closed`; `__main__` run hook.
+- `/workspaces/knob-controller/fs1/launcher.py`: sim-compatible + executable launcher; `_load_apps`/`_load_plugin_manifests`; `_clock_positions` clock formation; first-letter temp icons; module-level `on_encoder`/`on_button`/`on_touch`/`on_data_update` → `_launcher_instance`; `_SimWSClient` stdout-JSON WS bridge (sim); `_enter_plugin` (request code on demand) / `_activate_app` (accepts only `pending_app_id`, plain-loop app lookup — no `next(gen, default)`) / `_exec_plugin` module entry for server delivery; `_show_loading_screen`; emits `app_loaded`/`app_closed`; `__main__` run hook.
 - `/tmp/knob-test/`: Node harness — `micropython.patched.js`, `harness.js`, `globals.js`, `run_launcher.py`, t*.py probes, `firmware.wasm` copy.
 - `restart-server.sh`: kills server by port-PID, restarts with cleared server.log.
 - `/workspaces/knob-controller/server.log` (server output), `/tmp/bridge.log` (bridge output).

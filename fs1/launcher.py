@@ -33,6 +33,28 @@ except ImportError:
 def sleep_ms(ms):
     utime.sleep_ms(ms)
 
+class _SimWSClient:
+    """Sim fallback for the knob's real ws_client: relays WS sends as stdout
+    JSON. The browser forwards those messages to the bridge → PC server, so
+    plugins' send_plugin_input/send_data_request work in the sim too."""
+    def set_message_callback(self, cb):
+        self._cb = cb
+
+    def send_plugin_input(self, app_name, action, value):
+        print(json.dumps({"type": "plugin_input", "app": app_name, "action": action, "value": value}))
+
+    def send_app_switch(self, app_name):
+        print(json.dumps({"type": "app_switch", "app": app_name}))
+
+    def send_app_request(self, app_name):
+        print(json.dumps({"type": "app_request", "app": app_name}))
+
+    def send_data_request(self, app_name):
+        print(json.dumps({"type": "data_request", "app": app_name}))
+
+    def send_text(self, data):
+        print(json.dumps(data))
+
 try:
     import lvgl as lv
     LVGL_AVAILABLE = True
@@ -122,6 +144,17 @@ def on_touch(x, y, pressed):
     if _launcher_instance and pressed:
         _launcher_instance._handle_touch(x, y)
 
+def on_data_update(data):
+    if _launcher_instance:
+        _launcher_instance._on_ws_message({'type': 'data_update', 'data': data})
+
+def _exec_plugin(app_id, code):
+    """Module-level entry used by the PC server's on-demand code delivery.
+    The server sends `_exec_plugin('volume', <source>)`; this hands it to the
+    running launcher so apps aren't embedded in launcher.py."""
+    if _launcher_instance:
+        _launcher_instance._activate_app(app_id, code)
+
 
 class Launcher:
     """Home screen launcher with app switching."""
@@ -144,6 +177,7 @@ class Launcher:
         self.plugin_screen_objs = []
         self.plugin_module = None
         self.active_app_id = None
+        self.pending_app_id = None
 
         # Apps
         self.apps = []
@@ -272,6 +306,10 @@ class Launcher:
             self.ws_client.set_message_callback(self._on_ws_message)
         except Exception as e:
             print(f"[launcher] WebSocket init failed: {e}")
+            if self.sim_mode:
+                self.ws_client = _SimWSClient()
+                self.ws_client.set_message_callback(self._on_ws_message)
+                print("[launcher] Using stdout JSON WS bridge (sim)")
 
     def _load_ws_uri(self):
         """Load WebSocket URI from settings or use default."""
@@ -337,7 +375,7 @@ class Launcher:
                 self.apps.append(entry)
 
         print(f"[launcher] Apps: {[a.get('name') for a in self.apps]}")
-        print(f"[launcher] App code present: {[bool(a.get('code')) for a in self.apps]}")
+        print(f"[launcher] App code: on-demand (embedded: {[bool(a.get('code')) for a in self.apps]})")
 
     def _load_plugin_manifests(self):
         """Scan /fs1/plugins/*/manifest.json for plugin metadata."""
@@ -451,7 +489,11 @@ class Launcher:
         self.plugin_screen_objs = []
 
     def _enter_plugin(self, index):
-        """Enter an app from the home screen — load and run its code."""
+        """Enter an app from the home screen.
+
+        Code may come from the app entry, the device filesystem, or (in the
+        sim) on demand from the PC server via `app_request`. Only metadata is
+        shipped to the knob, so apps are fetched one at a time when selected."""
         if index >= len(self.apps):
             return
 
@@ -459,12 +501,40 @@ class Launcher:
         app_id = app.get('id', '')
         print(f"[launcher] Launching app: {app.get('name')}")
 
+        self.pending_app_id = app_id
+        code = app.get('code') or self._read_plugin_code(app_id)
+        if code:
+            self._activate_app(app_id, code)
+        elif self.ws_client:
+            # Ask the PC server for this app's code
+            self._show_loading_screen(app)
+            self.current_screen = 'plugin'
+            self.ws_client.send_app_request(app_id)
+            print(f"[launcher] Requested app code: {app_id}")
+        else:
+            self._activate_app(app_id, None)
+
+    def _activate_app(self, app_id, code):
+        """Actually load and run an app (called directly or when its code
+        arrives from the server). Only accepts the app currently requested,
+        so a code delivery that arrives after the user went home is ignored."""
+        if self.pending_app_id != app_id:
+            print(f"[launcher] Ignoring app code for non-active request: {app_id}")
+            return
+        self.pending_app_id = None
+
+        app = {}
+        for a in self.apps:
+            if a.get('id') == app_id:
+                app = a
+                break
+        app_name = app.get('name', app_id)
+        print(f"[launcher] Activating app: {app_name}")
+
         self._new_plugin_screen()
         self.active_app_id = app_id
         self.plugin_module = None
 
-        code = app.get('code') or self._read_plugin_code(app_id)
-        print(f"[launcher] App '{app.get('name')}': code={'yes' if code else 'NO'} ({len(code)} chars)" if code else f"[launcher] App '{app.get('name')}': code=NO")
         if code:
             self._exec_app(app, code)
         else:
@@ -473,13 +543,34 @@ class Launcher:
         self.current_screen = 'plugin'
 
         # Tell the page which app is now running (drives the file bar)
-        print(json.dumps({"type": "app_loaded", "app": app_id, "name": app.get('name', app_id)}))
+        print(json.dumps({"type": "app_loaded", "app": app_id, "name": app_name}))
 
         # Notify PC
         if self.ws_client:
             self.ws_client.send_app_switch(app_id)
 
         # Switch to plugin screen
+        lv.screen_load(self.scr_plugin)
+
+    def _show_loading_screen(self, app):
+        """Transient screen shown while the app's code is being fetched."""
+        self._new_plugin_screen()
+        self.active_app_id = app.get('id')
+        self.plugin_module = None
+
+        title = lv.label(self.scr_plugin)
+        title.set_text(app.get('name', 'App'))
+        title.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
+        title.set_style_text_font(FONT_NAME, 0)
+        title.align(lv.ALIGN.CENTER, 0, -20)
+
+        hint = lv.label(self.scr_plugin)
+        hint.set_text("loading…")
+        hint.set_style_text_color(lv.color_hex(0x555555), 0)
+        hint.set_style_text_font(FONT_SMALL, 0)
+        hint.align(lv.ALIGN.CENTER, 0, 10)
+
+        self.plugin_screen_objs = [title, hint]
         lv.screen_load(self.scr_plugin)
 
     def _read_plugin_code(self, app_id):
@@ -549,6 +640,7 @@ class Launcher:
         closed_id = self.active_app_id
         self.plugin_module = None
         self.active_app_id = None
+        self.pending_app_id = None
         self.current_screen = 'home'
         self._update_home_selection()
         if closed_id:

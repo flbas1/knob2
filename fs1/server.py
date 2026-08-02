@@ -175,7 +175,9 @@ class KnobServer:
         return buf
 
     def _build_app_list(self, machine):
-        """Merge a machine's app list with the plugin manifests + code on disk."""
+        """Merge a machine's app list with the plugin manifests on disk.
+        Metadata only — app code is NOT embedded; the knob requests it
+        on demand via `app_request` (so launcher.py stays small with ~20 apps)."""
         manifests = self._load_plugin_manifests()
         apps = []
         for app in machine.get('apps') or []:
@@ -188,7 +190,6 @@ class KnobServer:
             entry['name'] = app.get('name') or man.get('name') or pid
             entry['icon'] = app.get('icon') or man.get('icon')
             entry['icon_data'] = man.get('icon_data')
-            entry['code'] = self._read_plugin_code(pid)
             apps.append(entry)
         return apps
 
@@ -264,16 +265,35 @@ class KnobServer:
             return
         t = msg.get("type")
 
-        if t == "action":
+        if t in ("action", "plugin_input"):
             app = msg.get("app", "")
-            cmd = msg.get("cmd", "")
+            cmd = msg.get("cmd") or msg.get("action") or ""
             val = msg.get("value")
-            print(f"[server] Action: {app} {cmd}={val}")
+            print(f"[server] {t}: {app} {cmd}={val}")
             self.client._handle_plugin_input(app, cmd, val)
 
         elif t == "app_selected":
             app = msg.get("app", "")
             print(f"[server] App selected: {app}")
+
+        elif t == "app_switch":
+            print(f"[server] App switched: {msg.get('app')}")
+
+        elif t == "app_request":
+            app = msg.get("app", "")
+            code = self._read_plugin_code(app)
+            if code:
+                # Wrap the plugin source in a call into the RUNNING launcher
+                payload = "_exec_plugin(%r, %r)\n" % (app, code)
+                print(f"[server] Sent app code: {app}.py ({len(code)} chars)")
+            else:
+                payload = "_exec_plugin(%r, None)\n" % app
+                print(f"[server] No code for app: {app} — placeholder")
+            self._send_ws_text(self.knob_socket, json.dumps({
+                "type": "execute",
+                "file": app + ".py",
+                "code": payload
+            }))
             # Future: send app MicroPython code to knob
 
         elif t == "launcher_ready":

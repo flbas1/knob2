@@ -350,10 +350,14 @@ function handleWsMsg(msg) {
             log('Bootstrap ready — pick a machine above, then press Start Bootstrap', 'info');
             return;
         }
-        const guidOverride = document.getElementById('guid-input').value.trim();
-        if (guidOverride) {
-            code = `_MACHINE_GUID = "${guidOverride}"\n` + code;
+        if (msg.file === 'launcher.py') {
+            const guidOverride = document.getElementById('guid-input').value.trim();
+            if (guidOverride) {
+                code = `_MACHINE_GUID = "${guidOverride}"\n` + code;
+            }
         }
+        // App files (e.g. volume.py) arrive wrapped in _exec_plugin('volume', ...)
+        // and are handed to the running launcher — run as-is.
         log(`Executing code from server (${code.length} chars)`, 'info');
         codeEditor.value = code;
         runInSimulator(code);
@@ -559,7 +563,6 @@ print("Ready")
 
 function sendEncoder(direction, delta = 1) {
     log(`Encoder: ${direction}`, 'info');
-    wsSend({ sender: 'browser', type: 'encoder', direction, delta });
 
     const sign = direction === 'cw' ? delta : -delta;
     runInSimulator(`
@@ -574,7 +577,6 @@ except Exception as e:
 
 function sendButton() {
     log('Button: pressed', 'info');
-    wsSend({ sender: 'browser', type: 'button' });
     runInSimulator(`
 try:
     on_button()

@@ -46,6 +46,9 @@ class KnobClient:
         self.ha_url = os.environ.get("HA_URL", "http://homeassistant.local:8123")
         self.ha_token = os.environ.get("HA_TOKEN", "")
 
+        # Last requested volume (fallback when the OS won't report a value)
+        self._last_volume = None
+
         # Platform-specific volume control
         self._volume_control = self._init_volume_control()
 
@@ -153,9 +156,12 @@ class KnobClient:
             if action == "mute":
                 if self._volume_control:
                     self._volume_control.toggle_mute()
+                    self._send_volume_update(self._volume_control.get_volume())
             elif action == "set":
                 if self._volume_control:
                     self._volume_control.set_volume(value)
+                    self._last_volume = value
+                    self._send_volume_update(self._volume_control.get_volume())
 
         elif app == "zoom":
             if action == "set":
@@ -170,7 +176,7 @@ class KnobClient:
                 self._set_ha_brightness(value)
 
     def _handle_data_request(self, app):
-        """Handle data request from knob (e.g., current brightness)."""
+        """Handle data request from knob (e.g., current brightness/volume)."""
         if app == "brightness":
             brightness = self._get_ha_brightness()
             if brightness is not None:
@@ -180,6 +186,21 @@ class KnobClient:
                     "data": {"value": brightness}
                 }
                 self._send_ws_text(json.dumps(msg))
+        elif app == "volume":
+            if self._volume_control:
+                self._send_volume_update(self._volume_control.get_volume())
+
+    def _send_volume_update(self, level):
+        """Report the PC's current volume back to the knob as a data_update."""
+        if level is None:
+            level = self._last_volume if self._last_volume is not None else 0
+        self._last_volume = int(round(level))
+        msg = {
+            "type": MSG_DATA_UPDATE,
+            "app": "volume",
+            "data": {"value": self._last_volume}
+        }
+        self._send_ws_text(json.dumps(msg))
 
     def _send_zoom(self, value):
         """Send zoom command (Ctrl+scroll)."""
@@ -337,27 +358,41 @@ class LinuxVolumeControl:
 
     def set_volume(self, level):
         level = max(0, min(100, level))
-        subprocess.run(
-            ["amixer", "set", "Master", f"{level}%"],
-            capture_output=True
-        )
+        try:
+            subprocess.run(
+                ["amixer", "set", "Master", f"{level}%"],
+                capture_output=True, timeout=5
+            )
+        except Exception:
+            pass
 
     def get_volume(self):
-        result = subprocess.run(
-            ["amixer", "get", "Master"],
-            capture_output=True, text=True
-        )
+        try:
+            result = subprocess.run(
+                ["amixer", "get", "Master"],
+                capture_output=True, text=True, timeout=5
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
         for line in result.stdout.split("\n"):
             if "[" in line and "%" in line:
                 pct = line.split("[")[1].split("%")[0]
-                return int(pct)
-        return 0
+                try:
+                    return int(pct)
+                except ValueError:
+                    return None
+        return None
 
     def toggle_mute(self):
-        subprocess.run(
-            ["amixer", "set", "Master", "toggle"],
-            capture_output=True
-        )
+        try:
+            subprocess.run(
+                ["amixer", "set", "Master", "toggle"],
+                capture_output=True, timeout=5
+            )
+        except Exception:
+            pass
 
 
 class WindowsVolumeControl:

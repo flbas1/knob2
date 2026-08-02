@@ -72,6 +72,9 @@ def setup(parent, hardware):
 
 def start():
     """Called when plugin becomes active."""
+    # Ask the PC for the current volume so the arc opens at the real value
+    if _ws_client:
+        _ws_client.send_data_request(_app_name)
     print("[volume] Active")
 
 

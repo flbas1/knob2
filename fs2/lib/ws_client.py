@@ -16,6 +16,7 @@ MSG_PLUGIN_INPUT = "plugin_input"
 MSG_APP_SWITCH = "app_switch"
 MSG_STATE_UPDATE = "state_update"
 MSG_DATA_REQUEST = "data_request"
+MSG_APP_REQUEST = "app_request"
 
 STATE_DISCONNECTED = 0
 STATE_CONNECTING = 1
@@ -154,6 +155,12 @@ class WSClient:
     def send_data_request(self, app_name):
         return self.send_text({
             "type": MSG_DATA_REQUEST,
+            "app": app_name
+        })
+
+    def send_app_request(self, app_name):
+        return self.send_text({
+            "type": MSG_APP_REQUEST,
             "app": app_name
         })
 
