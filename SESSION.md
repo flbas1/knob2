@@ -4,9 +4,10 @@ Saved session state for continuity between work sessions.
 
 ## Objective
 - Finish the Smart Knob system: PC server (`fs1/server.py`) drives bootstrap → config → launcher with literal-GUID machine configs; browser sim bridged via `testKnob.py`.
-- **Current milestone: apps fetched on demand.** launcher.py ships metadata-only (`_SERVER_APPS` without `code`); selecting an app sends `app_request` → server replies with `_exec_plugin('<id>', <source>)` wrapped in a normal `execute` message — launcher.py stays small even with ~20 apps. Volume round-trip still works: app `on_encoder` → `send_plugin_input("volume","set",v)` → server → `set_volume` (real OS) → read back → `data_update` → launcher `on_data_update` → arc snaps to the PC's actual value.
+- **Volume is DONE and user-confirmed on the Mac host** (commit `e243cee5` "let the good times roll (volume works!)"). Real Mac audio now works: knob arc ↔ real OS volume, both directions, with the state watcher pushing external changes back to the knob.
+- **Scroll milestone DONE** (commit pending): `fs1/plugins/scroll/plugin.py` rewritten volume-style with a per-notch delta fix + animated arrow feedback. Encoder turns scroll the focused window (server `_send_scroll`: macOS `cliclick`, Linux `xdotool`); the arc is a velocity gauge (-10..+10) that eases back to 0, and a bouncing ▲/▼ arrow plays as the feedback since scroll has no readable position.
 
-## Latest milestone — apps in a clock formation (verified in harness)
+## Latest milestone — scroll.py (done, verified in harness)
 - App source of truth = the machine config's `apps` list (from `_MACHINE_CONFIG`), merged with `/fs1/plugins/*/manifest.json` metadata. Server injects the merged list into the launcher as `_SERVER_APPS` (server.py `_build_app_list` reads machine `apps` + `_load_plugin_manifests` from disk); launcher prefers `_SERVER_APPS`, falls back to `_MACHINE_CONFIG['apps']`, then to scanning `/fs1/plugins`.
 - Home screen: apps placed by `_clock_positions(n)` — radius 110, start at 12 o'clock, clockwise: 4 apps → (0,-110),(110,0),(0,110),(-110,0); 6 apps → (0,-110),(95,-55),(95,55),(0,110),(-95,55),(-95,-55). Machine name ("Home Mac") stays centered. Temp icon = first letter (e.g. V, M, B, S) in a 72px circle; name below.
 - Sim input routing: launcher now defines module-level `on_encoder(delta)`, `on_button()`, `on_touch(x,y,pressed)` that dispatch to the singleton via `_launcher_instance` (set in `run()`). Browser's existing `sendEncoder`/`sendButton`/canvas-touch call these directly — no bridge/HTML changes needed.
@@ -37,8 +38,13 @@ Saved session state for continuity between work sessions.
   - `_activate_app` only accepts when `pending_app_id == app_id` (cleared on success and in `_go_home`) so a code delivery that arrives after the user went home is ignored.
   - `_enter_plugin`/`_activate_app` split; `_exec_app` unchanged (execs into a fresh plugin module with `_font`/`_symbol`).
   - `fs2/lib/ws_client.py` gained `send_app_request` (+ `MSG_APP_REQUEST`) for hardware parity; sim `_SimWSClient` mirrors it.
-  - MicroPython gotcha found here: **`next((x for x in it if cond), default)` raises `TypeError: argument num/types mismatch` in this build** — the app-by-id lookup uses a plain loop instead.
-  - Real hardware fallback unchanged: `_enter_plugin` still tries embedded code / `/fs1/plugins/<id>/plugin.py` before requesting from the server.
+- MicroPython gotcha found here: **`next((x for x in it if cond), default)` raises `TypeError: argument num/types mismatch` in this build** — the app-by-id lookup uses a plain loop instead.
+- Real hardware fallback unchanged: `_enter_plugin` still tries embedded code / `/fs1/plugins/<id>/plugin.py` before requesting from the server.
+- **Scroll plugin rewritten (new, harness-verified):**
+  - **Double-scroll bug fixed:** old code sent the ACCUMULATED `_current_value` (-10..+10) as the scroll command, but the server scrolls `abs(value)` notches per message — turning 3 notches sent 1, then 2, then 3 → 6 actual scrolls. Now `on_encoder` sends `delta * _sensitivity` per turn: harness shows `value:1, 1, -1` for `+1,+1,-1`. Server side unchanged (`_send_scroll(value)` scrolls `abs(value)`).
+  - **No feedback for scroll** (scrollbar position can't be queried via stdlib on macOS; `_state_readers`/`_watched_apps` only cover volume/brightness) → feedback is now a **bouncing direction arrow**: `lv.SYMBOL.UP/DOWN` label below the arc pulses via `lv.anim_t` + `set_custom_exec_cb` (opacity 255→0 with playback, `set_y` lift by direction), and the arc/label ease back to 0 via a second `lv.anim_t` decay (`_decay_arc`/`_decay_exec_cb`). Harness: after anim loop, arc value 0, label "+0", arrow opa mid-fade (227).
+  - **LVGL anim API finding (KEY):** `lv.anim_t.set_exec_cb(cb)` **HANGS the sim** (and `a.exec_cb = cb` raises `Cannot convert 'function' to pointer!`); `lv.timer_create(...)` **also hangs the sim** even with a `None` callback. The working pattern is **`lv.anim_t` + `set_custom_exec_cb(cb)`** (per lv_binding_micropython's `advanced_demo.py`) with `set_var/set_values/set_time/set_playback_time/set_repeat_count/start` — verified: callback fires with interpolated values, `set_style_opa` animates 255→240+ over frames. `lv.tick_inc(ms)` + `lv.timer_handler()` drive it in the sim; `ANIM_REPEAT_INFINITE=65535` exists, `lv.anim_delete/anim_delete_all` exist. `lv.anim_path_*`, `lv.ANIM_REPEAT_MODE/STATE` are absent.
+  - Plugin layout mirrors volume.py: name label TOP_MID y=22 ("Scroll"), orange `0xFF9500` arc (270°, -10..+10), centered value label (`f"{v:+d}"`), arrow at CENTER y=130. Sensitivity default 1 (manifest min 1 max 5). Button resets the gauge to 0.
 
 ## Important Details
 - Knob-as-host framing (user): "the knob is the host — it controls the pc. the pc is the client… a very symbiotic relationship."
@@ -93,6 +99,8 @@ Saved session state for continuity between work sessions.
 
 ### Active / Pending
 - HID command pattern implemented (command registry → apply → ack; state watcher pushes PC-side changes). Server restarted. To see the push in the browser: hard-refresh → Volume → the arc should jump on its own if something else changes the OS volume (on this box there's no audio, so it stays put — real PC will show it).
+- **Scroll plugin done + harness-verified** (`test_scroll.py`). NOT yet user-tested on the Mac. To test live: restart `server.py` on the Mac (scroll.py is re-read per `app_request`, but confirm cliclick is installed for the scroll action), hard-refresh, tap Scroll, spin the knob over a scrollable window — expect the window to scroll per notch and the ▲/▼ arrow to bounce on the display.
+- **cliclick dependency:** macOS `_send_scroll` shells out to `cliclick scroll-up/down` — that binary must be installed on the Mac (`brew install cliclick`). Without it the server logs `Scroll failed: FileNotFoundError`. Linux needs `xdotool`.
 - Confirm in browser: tap Volume → console shows `app_request` then server.log shows `Sent app code: volume.py` then `App switched: volume`; file bar shows `volume.py`; arc renders (container echoes volume, so value holds).
 - Real app icons: source PNGs → base64 into each plugin `manifest.json` `icon_data` field (scaffold reads it). Rendering needs a PNG decode path in the sim build (none today) — alternatives: LVGL C-image `.c` files, or a sprite font.
 - Future: re-bootstrap mid-connection (server currently one-shot per connection; changing machine needs a page reload).
@@ -103,17 +111,18 @@ Saved session state for continuity between work sessions.
 - (none) — on-demand flow verified end-to-end in harness (metadata-only list → `app_request` → server wrapper → `_exec_plugin` → activate → late-delivery guard) and server socketpair test; awaiting live-browser confirmation after a hard refresh.
 
 ## Next Move
-1. User hard-refreshes the sim and presses Start Bootstrap.
-2. Confirm: tap Volume → file bar `volume.py`; server.log: `App requested: volume` → `Sent app code: volume.py (4040 chars)` → `App switched: volume`; arc renders; spin encoder → `plugin_input set=N` + `data_update` reply; tap display → back home.
-3. If clean, commit ("apps fetched on demand: server sends one plugin at a time via _exec_plugin; launcher stays small for ~20 apps").
-4. Future: real base64 PNG icons (needs a decode path), mid-connection re-bootstrap, real-PC volume test (osascript/amixer), brightness data_request→HA already works via same shim.
+1. User restarts `server.py` on the Mac (scroll.py is re-read per app_request; confirm `cliclick` is installed), hard-refreshes, taps Scroll, and spins the knob over a scrollable window — expect per-notch scrolling + the bouncing ▲/▼ arrow.
+2. If clean, commit the scroll milestone ("scroll works: per-notch delta + animated arrow feedback (set_custom_exec_cb), modeled on volume.py"). SESSION.md already updated for "past volume".
+3. Future: real base64 PNG icons (needs a decode path), mid-connection re-bootstrap, real-PC volume test (osascript/amixer), brightness data_request→HA already works via same shim, and a `cliclick` presence check / graceful "install cliclick" hint in `_send_scroll`.
 
 ## Relevant Files
 - `/workspaces/knob-controller/fs1/test-env/static/lvgl.html`: WASM iframe; `mp_interp_ready` gate + queue flush; `code_received` ACK; `micropython.js?v=2` + `locateFile ?v=2`; 16ms `lv.timer_handler()` render pump; `on_touch`; square `lv.sdl_window_create(360, 360)`.
 - `/workspaces/knob-controller/fs1/test-env/index.html`: resizable right panel; editor mirrors server code; `_lastServerCode` resend-on-`mp_ready`; `code_received` clears; `#current-file` bar (now also driven by `app_loaded`/`app_closed`); `?v=7` iframe.
 - `/workspaces/knob-controller/fs1/test-env/testKnob.py`: transparent bridge (:8080 + :8766 → :8765); `s.settimeout(None)` after handshake; ReuseTCPServer.
 - `/workspaces/knob-controller/fs1/server.py`: `SERVER_VERSION = "0.1.0"`; preamble injection; `_build_app_list` metadata-only (no embedded code); `_route_message` handles `plugin_input`/`action`/`app_switch`/`app_request`/`data_request`/`app_loaded`/`app_closed`; `app_request` sends `_exec_plugin('<id>', <src>)` wrapper.
-- `/workspaces/knob-controller/fs1/pc/knob_client/main.py`: `_handle_plugin_input` volume set/mute now reply with `data_update`; `_handle_data_request('volume')` answers current volume; `_send_volume_update` (falls back to last requested when OS can't report); robust Linux `get_volume` (None on failure).
+- `/workspaces/knob-controller/fs1/plugins/volume/plugin.py`: working volume template (label y=22, arc + `_current_value`, `on_encoder` → `send_plugin_input`, `on_data_update`).
+- `/workspaces/knob-controller/fs1/plugins/scroll/plugin.py`: scroll rewritten volume-style — per-notch delta, velocity gauge, `set_custom_exec_cb` arrow pulse + arc decay.
+- `/workspaces/knob-controller/fs1/pc/knob_client/main.py`: command registry, `_ack_state` (volume echoes commanded value), `_watch_loop`, `_send_scroll` (Darwin `cliclick`, Linux `xdotool`). Committed.
 - `/workspaces/knob-controller/fs2/lib/ws_client.py`: adds `send_app_request` + `MSG_APP_REQUEST` (hardware parity with the sim shim).
 - `/workspaces/knob-controller/fs1/bootstrap.py`: resolves `location` from `_AVAILABLE_MACHINES` by GUID; reports `server_version`.
 - `/workspaces/knob-controller/fs1/launcher.py`: sim-compatible + executable launcher; `_load_apps`/`_load_plugin_manifests`; `_clock_positions` clock formation; first-letter temp icons; module-level `on_encoder`/`on_button`/`on_touch`/`on_data_update` → `_launcher_instance`; `_SimWSClient` stdout-JSON WS bridge (sim); `_enter_plugin` (request code on demand) / `_activate_app` (accepts only `pending_app_id`, plain-loop app lookup — no `next(gen, default)`) / `_exec_plugin` module entry for server delivery; `_show_loading_screen`; emits `app_loaded`/`app_closed`; `__main__` run hook.
