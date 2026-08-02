@@ -54,6 +54,8 @@ class KnobServer:
         self.server_socket.listen(1)
         self.server_socket.settimeout(1.0)
         print(f"[server] Listening on {self.host}:{self.port}")
+        self.client.running = True
+        self.client._start_state_watcher()
 
         while self.running:
             try:
@@ -354,7 +356,8 @@ class KnobServer:
                 frame.append((length >> (8 * i)) & 0xFF)
         frame.extend(data)
         try:
-            sock.sendall(bytes(frame))
+            with self.client.send_lock:
+                sock.sendall(bytes(frame))
         except Exception:
             pass
 

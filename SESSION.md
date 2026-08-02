@@ -71,6 +71,7 @@ Saved session state for continuity between work sessions.
 - Do NOT `pkill -f` with process path (kills the shell); kill by PID from `ss -ltnp`.
 - `testKnob.py` HTTP bind needs `ReuseTCPServer(socketserver.TCPServer)` with `allow_reuse_address = True`.
 - Server protocol flow: `execute bootstrap` → `bootstrap_response` (machine/guid/version/location) → match GUID to config → `config` glue (defines `_MACHINE_CONFIG` in sim, prints `config_ack`) → `config_ack` → `execute launcher.py` → command loop. Server also logs `[server] Injected 3 machines (v0.1.0) into bootstrap` and `Knob: machine=... guid=... version=... location=...`.
+- **HID command pattern (generic, used over and over):** knob sends `plugin_input {app, action, value}`; the server's `_app_actions` registry applies the command, then `_ack_state(app)` reads the app's current state via `_state_readers` and replies `data_update {app, data:{value}}`. `data_request {app}` answers the same way. For apps with a state reader, a background `_watch_loop` (thread, `_watched_apps`) polls the OS every `_watch_interval` (1s) and pushes `data_update` when the value changed **on the PC side** (e.g. OS media keys/UI), so the knob always mirrors the PC. Unknown `app.action` is refused with `[client] No handler for command: ...`. Volume commands: `set` (0-100), `mute`. Sends from the watcher thread and the server thread are serialized through one shared `send_lock` (same socket). Verified in socketpair test: `set=63` → ack 63; `data_request` → 63; external change to 77 → watcher pushed 77.
 
 ## Work State
 ### Completed
@@ -91,12 +92,12 @@ Saved session state for continuity between work sessions.
 - Commit `604bd5e2` pushed. Legacy constants in `fs1/pc/knob_client/main.py` (lines 26–32) removed.
 
 ### Active / Pending
-- Server restarted with on-demand app delivery, listening on :8765. User hard-refreshes `http://localhost:8080` → Start Bootstrap.
+- HID command pattern implemented (command registry → apply → ack; state watcher pushes PC-side changes). Server restarted. To see the push in the browser: hard-refresh → Volume → the arc should jump on its own if something else changes the OS volume (on this box there's no audio, so it stays put — real PC will show it).
 - Confirm in browser: tap Volume → console shows `app_request` then server.log shows `Sent app code: volume.py` then `App switched: volume`; file bar shows `volume.py`; arc renders (container echoes volume, so value holds).
 - Real app icons: source PNGs → base64 into each plugin `manifest.json` `icon_data` field (scaffold reads it). Rendering needs a PNG decode path in the sim build (none today) — alternatives: LVGL C-image `.c` files, or a sprite font.
 - Future: re-bootstrap mid-connection (server currently one-shot per connection; changing machine needs a page reload).
 - Sim diagnostics still in place (WS close codes, iframe load/unload postMessage events) — removable once testing settles.
-- Uncommitted: this milestone's launcher/server/pc_client/volume plugin/index.html/fs2 ws_client changes + SESSION.md.
+- Uncommitted: HID command pattern (pc_client registry + state watcher + shared send lock) + SESSION.md.
 
 ### Blocked
 - (none) — on-demand flow verified end-to-end in harness (metadata-only list → `app_request` → server wrapper → `_exec_plugin` → activate → late-delivery guard) and server socketpair test; awaiting live-browser confirmation after a hard refresh.

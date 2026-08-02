@@ -33,7 +33,7 @@ def setup(parent, hardware):
     name_label.set_text("Volume")
     name_label.set_style_text_color(lv.color_hex(0xAAAAAA), 0)
     name_label.set_style_text_font(_font('font_montserrat_20', 'font_montserrat_24', 'font_montserrat_16'), 0)
-    name_label.align(lv.ALIGN.TOP_MID, 0, 40)
+    name_label.align(lv.ALIGN.TOP_MID, 0, 22)
 
     # Arc control (270 degrees, gap at bottom)
     _arc = lv.arc(parent)
