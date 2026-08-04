@@ -64,6 +64,7 @@ class KnobClient:
             "zoom": {"set": self._send_zoom},
             "scroll": {"scroll": self._send_scroll},
             "brightness": {"set": self._set_ha_brightness},
+            "girlfriend": {"mode": self._set_girlfriend_mode},
         }
         self._state_readers = {
             "volume": self._read_volume,
@@ -199,6 +200,15 @@ class KnobClient:
     def _toggle_mute(self, value):
         if self._volume_control:
             self._volume_control.toggle_mute()
+
+    def _set_girlfriend_mode(self, value):
+        modes = ("mute", "clean", "relax", "watch tv", "romance", "cook", "sleep")
+        try:
+            idx = int(value)
+            name = modes[idx] if 0 <= idx < len(modes) else value
+        except (ValueError, TypeError):
+            name = value
+        print(f"[client] girlfriend is: {name}")
 
     def _ack_state(self, app):
         """Acknowledge a command by reporting the state we just applied.

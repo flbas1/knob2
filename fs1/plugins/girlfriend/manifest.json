@@ -1,0 +1,10 @@
+{
+    "name": "Girlfriend",
+    "id": "girlfriend",
+    "version": "1.0.0",
+    "entry": "plugin.py",
+    "icon": "girlfriend",
+    "icon_anim": "pulse",
+    "haptic_feedback": true,
+    "settings": {}
+}

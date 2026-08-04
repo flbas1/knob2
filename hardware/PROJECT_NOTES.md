@@ -3,6 +3,13 @@
 ## Overview
 Cross-platform smart knob controller system. The ESP32-S3 knob is the **host** (runs apps, LVGL UI, makes decisions). The PC/phone is a **client** (provides data, HID output). USB is primary transport; WiFi is fallback.
 
+**Current implementation (2026-08):** the knob firmware is **MicroPython + LVGL**,
+built with lv_micropython for the `WAVESHARE_ESP32_S3_KNOB` board (ESP-IDF v5.3).
+The C ESP-IDF app described in the historical sections below (HID/TinyUSB, LVGL v8,
+`sdkconfig.defaults`, `main.c`/`knob_ui.c`) was replaced by the MicroPython firmware
+in `../fs2/`; those notes are kept as design reference only. See the root `README.md`
+and `../fs2/README.md` for the current build & deploy flow.
+
 ## Hardware
 - **Board**: Waveshare ESP32-S3-Knob-Touch-LCD-1.8 (dual MCU: ESP32-S3R8 + ESP32-U4WDH)
 - **Display**: SH8601 AMOLED QSPI 360x360
@@ -22,46 +29,29 @@ fs1:    0x10000,    3MB  (FAT32, user-accessible, machine configs)
 factory: 0x310000, ~12.9MB (ESP-IDF app)
 ```
 
-## File Structure
+## File Structure (current)
 ```
-knob-control/                    # Root project directory
-├── CMakeLists.txt
-├── sdkconfig.defaults
-├── partitions.csv
-├── main/
-│   ├── CMakeLists.txt
-│   ├── Kconfig.projbuild
-│   ├── idf_component.yml
-│   ├── main.c                   # Entry point, boot sequence, main loop
-│   ├── pins.h                   # GPIO mappings (verified from 3rd party repos)
-│   ├── hardware_init.c/.h       # I2C, CST816, DRV2605, encoder ISR, button
-│   ├── hid.c/.h                 # USB HID composite (Consumer+Mouse+Keyboard)
-│   ├── knob_ui.c/.h             # LVGL v8 UI, SH8601 QSPI driver, PSRAM buffers
-│   ├── websocket_client.c/.h    # WiFi STA + WebSocket client
-│   ├── machine_detect.c/.h      # FAT32 FS1 mount, machine config detection
-│   └── app_manager.c/.h         # App switching logic
-├── fs1/
-│   ├── machines/
-│   │   ├── home.json
-│   │   └── work.json
-│   ├── settings.json
-│   ├── pc/knob_client/          # Python PC client
-│   ├── iphone/KnobApp/          # iOS Swift client
-│   ├── android/KnobApp/         # Android Kotlin client
-│   └── test-env/                # LVGL browser simulator test environment
-│       ├── server.py            # Python WebSocket bridge (stdlib only, no pip)
-│       ├── index.html           # Modified LVGL simulator with WS injection
-│       ├── README.md
-│       └── static/              # LVGL MicroPython simulator (from sim.lvgl.io v8.3)
-│           ├── index.html
-│           ├── app.js           # Monaco editor + MicroPython WASM bundle (3MB)
-│           ├── main.css
-│           ├── lvgl.html
-│           ├── micropython.js
-│           ├── micropython.wasm
-│           ├── firmware.wasm    # MicroPython + LVGL WASM (6MB)
-│           └── wasm_file_api.js
-└── README.md
+knob-controller/
+├── fs1/                       # /fs1 filesystem payload (flashed to the fs1 partition)
+│   ├── bootstrap.py           # location picker — exec'd first by main.py
+│   ├── launcher.py            # app launcher UI (frozen into firmware from here)
+│   ├── server.py              # thin PC server (WS :8765) — identity + command routing
+│   ├── settings.json          # boot_backlight / websocket_uri / static_ip
+│   ├── locations/*.json       # one per room: name, machine_guid, wifi, defaults, apps
+│   ├── plugins/<id>/          # app plugins (manifest.json + plugin.py)
+│   ├── pc/  iphone/  android/ # client shells
+│   └── test-env/              # browser sim + transparent WS bridge (testKnob.py)
+├── fs2/                       # frozen firmware (MicroPython + LVGL)
+│   ├── boot.py / main.py      # device entry; main.py runs /fs1/bootstrap.py first
+│   ├── lib/                   # hardware drivers: hardware, sh8601, cst816, encoder,
+│   │                          #   drv2605, hid, ws_client, wifi_connect, plugin_manager
+│   ├── protocol/              # shared JSON message types
+│   ├── partitions.csv         # fs1 3MB FAT + factory (mirrors board partition table)
+│   └── firmware/              # C-extension notes (none built today)
+└── hardware/                  # git-ignored SDKs
+    ├── esp-idf/               # ESP-IDF v5.3
+    ├── lv_micropython/        # MicroPython + LVGL build (board WAVESHARE_ESP32_S3_KNOB)
+    └── CrowPanel-.../         # vendor reference SDK (untracked)
 ```
 
 ## Key Decisions & Gotchas
@@ -143,11 +133,11 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 {"type":"button"}
 ```
 
-### Machine Detection
-- Mounts FS1 FAT32 at boot
-- Scans `machines/*.json`, loads first config found
-- If no match, all apps enabled by default (setup mode)
-- Uses `esp_vfs_fat_spiflash_mount_rw_wl()` with partition label `"fs1"`
+### Location Detection (current)
+- `boot.py` mounts the `fs1` FAT partition at `/fs1`; `main.py` runs `/fs1/bootstrap.py` first.
+- The PC server sends `identify` (its OS machine id) over the USB link; `bootstrap.py` reads `/fs1/locations/*.json` and preselects the matching `machine_guid`, filters by reachable `wifi.ssid` when standalone, else shows all.
+- Choice saved to `/fs1/.state.json`; wifi join for the chosen location happens in bootstrap; then `launcher.py` runs.
+- Historical C approach (replaced): `esp_vfs_fat_spiflash_mount_rw_wl()` with partition label `"fs1"`, first-match in `machines/*.json`, all-apps setup mode on no match.
 
 ### Client Apps
 - **PC** (Python): `fs1/pc/knob_client/__init__.py` — WebSocket client with music/weather/HA providers
@@ -162,14 +152,21 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 - Includes encoder buttons and console panel
 - HTTP port 8080, WS port 8765
 
-## Build Instructions
+## Build Instructions (current — MicroPython + LVGL)
 ```bash
-cd knob-control
-idf.py set-target esp32s3
-idf.py menuconfig    # Set WiFi SSID + Password
-idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+export IDF_PATH=$PWD/hardware/esp-idf            # ESP-IDF v5.3
+. $IDF_PATH/export.sh
+cd hardware/lv_micropython/ports/esp32
+idf.py -B build-WAVESHARE_ESP32_S3_KNOB -D MICROPY_BOARD=WAVESHARE_ESP32_S3_KNOB build
+
+# Flash (USB-capable machine; edge USB-C port)
+idf.py -B build-WAVESHARE_ESP32_S3_KNOB -p /dev/ttyUSB0 flash monitor
 ```
+First boot formats an empty `/fs1` — push the payload (`fs1/` → `settings.json`,
+`bootstrap.py`, `server.py`, `locations/*.json`, `plugins/*`) with `mpremote`
+before first use. Full command list in `../fs2/README.md`.
+
+Historical C build (replaced): `cd knob-control; idf.py set-target esp32s3; idf.py menuconfig; idf.py build; idf.py -p /dev/ttyUSB0 flash monitor`.
 
 ## Component Dependencies (idf_component.yml)
 ```yaml
@@ -195,17 +192,19 @@ CONFIG_VFS_LONG_NAMESUPPORT=y
 CONFIG_FREERTOS_HZ=1000
 ```
 
-## Current State
-- All source files created and consistent (verified, no missing symbols)
-- No ESP-IDF in current environment to do build test
-- PC client, iOS client, Android client all complete
-- Test environment server verified working (HTTP + WebSocket)
-- Project ready for `idf.py build` on a machine with ESP-IDF v5.4+
+## Current State (2026-08)
+- Firmware **compiled successfully** for `WAVESHARE_ESP32_S3_KNOB` (MicroPython + LVGL, ESP-IDF v5.3):
+  `micropython.bin` ≈2.6MB, frozen `boot`/`main`/`launcher` + `lib/*` + `protocol/messages`.
+  Partition table verified: `nvs`, `phy_init`, `fs1` FAT 3MB @ 0x10000, `factory` @ 0x310000.
+- Location picker + identify + wifi-join flow implemented and py_compile-clean; CPython harness verified
+  (USB-link skip, sim no-op, standalone wifi join).
+- PC server, PC/iOS/Android clients, and browser sim complete.
+- **Not yet done:** flashing + `/fs1` payload push to real hardware (needs a USB-capable machine — this
+  container has no USB), real-device display/touch/encoder bring-up, wifi join against a real AP.
 
-## Next Steps (on new machine)
-1. `idf.py set-target esp32s3 && idf.py build` — catch any compile errors
-2. Flash FS1 FAT32 partition — populate `machines/*.json` configs
-3. Test WiFi + WS flow with real credentials
-4. Verify USB HID composite device enumerates on host
-5. Test encoder ISR with physical device
-6. Verify display init sequence (SH8601 QSPI)
+## Next Steps
+1. Flash `micropython.bin` + bootloader + partition table on a USB-capable machine; push the `/fs1` payload.
+2. First-boot check: `/fs1` mounts, location picker renders, `.state.json` written after a pick.
+3. Standalone wifi join against a real AP (bedroom/living-room configs).
+4. Verify USB link path: knob plugged into a PC → server `identify` preselects the location.
+5. Real-device smoke tests: display init (SH8601 QSPI), touch (CST816), encoder, haptic (DRV2605), audio.

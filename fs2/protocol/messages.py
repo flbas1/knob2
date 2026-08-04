@@ -5,9 +5,9 @@ Message types and format constants used by both knob firmware
 and PC/iOS/Android clients.
 
 Protocol (server-driven bootstrap):
-    execute  (server → knob)  run MicroPython code
-    config   (server → knob)  machine config
-    bootstrap_response (knob → server)  identity after bootstrap
+    execute  (server → knob)  run MicroPython code (bootstrap/launcher/apps)
+    config   (server → knob)  machine config for the chosen location
+    bootstrap_response (knob → server)  identity + chosen location after bootstrap
     config_ack (knob → server)  config accepted
     launcher_ready (knob → server)  launcher UI live
     app_selected (knob → server)  user picked an app
@@ -35,8 +35,10 @@ MSG_DATA_UPDATE = "data_update"
 def make_execute(code, machines=None):
     """Server sends MicroPython code for the knob to run.
 
-    `machines` is an optional list of {guid, name, location} dicts
-    used by the simulator to populate its Machine dropdown.
+    `machines` is an optional list of {guid, name, location, wifi} dicts.
+    This is a **sim-only fallback**: the real knob reads its location list
+    from its own /fs1/locations, so it never needs the injected list. The
+    browser sim has no /fs1, so the server still sends it there.
     """
     msg = {"type": MSG_EXECUTE, "code": code}
     if machines is not None:
@@ -52,7 +54,8 @@ def make_config(config):
 def make_bootstrap_response(info):
     """Knob reports its identity after running bootstrap.py.
 
-    `info` carries at minimum `machine_guid` (and `machine` name).
+    `info` carries at minimum `machine_guid`, `machine` name, and the
+    user-selected `location` (the server matches the config by location).
     """
     return {"type": MSG_BOOTSTRAP_RESPONSE, "data": info}
 

@@ -27,15 +27,27 @@ Open http://localhost:8080 in your browser.
 1. Start both services (above)
 2. Open http://localhost:8080
 3. Watch the WebSocket log in the side panel:
-   - `{"type":"execute","code":"..."}` — bootstrap sent by server
-   - `{"type":"bootstrap_response",...}` — knob reports GUID
-   - `{"type":"config","config":{...}}` — server sends matched config
+   - `{"type":"identify",...}` — server identifies itself (machine guid on the USB link)
+   - `{"type":"execute","code":"..."}` — bootstrap sent by server (sim-only; the real knob reads its own /fs1)
+   - `{"type":"bootstrap_response",...}` — knob reports GUID + chosen **location**
+   - `{"type":"config","config":{...}}` — server sends config matched by location
    - `{"type":"config_ack","status":"ok"}` — knob accepts
    - `{"type":"execute","code":"..."}` — launcher sent
    - `{"type":"launcher_ready",...}` — UI is live
 4. Use arrow keys / buttons to navigate and select apps
 
-The **Machine** dropdown is populated from the `machines` array in the bootstrap `execute` message — it shows each config's name and location (e.g. `Home Mac (Home)`), and its `machine_guid` value (e.g. `mac-m1-max`) is injected as the `_MACHINE_GUID` override.
+The location picker lives in `bootstrap.py` and renders on the knob display —
+the **Machine dropdown is gone**. The picker behaves like the real knob:
+
+- **Default** — shows every location; rotate/press/tap to choose.
+- **Machine GUID filled in** (the optional text field above) — mimics the USB
+  path (the server's `identify` message on real hardware): that machine's
+  location(s) are preselected, auto-confirmed when unique.
+- The simulator has no wifi, so the wifi-filter path (`bootstrap.py` scanning
+  `network.WLAN`) never triggers in the browser — it only runs on the ESP32.
+- The sim has no /fs1, so bootstrap uses the **server-injected location list**
+  (`_AVAILABLE_MACHINES`). The real knob reads `/fs1/locations` directly — the
+  injected list is a sim-only fallback.
 
 ## Keyboard Shortcuts
 
@@ -59,4 +71,4 @@ test-env/
 └── README.md
 ```
 
-(bootstrap.py, launcher.py, and machines/ — GUID-named .json files — live in fs1/ alongside server.py)
+(bootstrap.py, launcher.py, and locations/ — location-named .json files — live in fs1/ alongside server.py)

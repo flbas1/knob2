@@ -37,9 +37,10 @@ except Exception as e:
 
 gc.collect()
 
-# Set default backlight if configured
+# Boot backlight — a fixed level so the location picker is visible in the dark
+# (per-location backlight applies only after the location is chosen).
 try:
-    _bl = _settings.get('defaults', {}).get('backlight', 0)
+    _bl = _settings.get('boot_backlight', 0)
     if _bl > 0:
         from machine import Pin, PWM
         _bl_pin = PWM(Pin(47), freq=5000, duty=_bl)

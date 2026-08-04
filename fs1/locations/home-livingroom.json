@@ -1,0 +1,15 @@
+{
+    "name": "Home Mac",
+    "machine_guid": "mac-m1-max",
+    "location": "Home Theater Room",
+    "haptic": false,
+    "sound": true,
+    "backlight": 60,
+    "wifi": {"ssid": "home_wifi", "password": "hunter2"},
+    "apps": [
+        {"id": "volume",    "name": "Volume"},
+        {"id": "music",     "name": "Music"},
+        {"id": "brightness","name": "Brightness"},
+        {"id": "scroll",    "name": "Scroll"}
+    ]
+}

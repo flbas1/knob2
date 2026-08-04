@@ -1,5 +1,11 @@
 # Firmware C Extensions
 
+> **Current status:** no C extensions are compiled into the firmware. All drivers
+> are Python (`../lib/`) and are frozen into the build via the board manifest
+> (`ports/esp32/boards/WAVESHARE_ESP32_S3_KNOB/manifest.py`), which freezes
+> `lib/`, `protocol/`, `boot.py`, `main.py`, and `launcher.py`. The notes below
+> are for when a Python module turns out to be too slow.
+
 This directory contains C source files for MicroPython C extension modules.
 
 These are only needed for hardware functionality not exposed by

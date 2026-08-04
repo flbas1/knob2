@@ -4,12 +4,12 @@ Smart Knob PC Server — the real server.
 Orchestrates bootstrap → config → launcher protocol.
 Routes app commands (volume, brightness, zoom, scroll) to system actions.
 """
-import argparse, fnmatch, json, os, socket, sys, threading, hashlib, base64, time
+import argparse, fnmatch, json, os, platform, socket, subprocess, sys, threading, hashlib, base64, time
 
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SERVER_VERSION = "0.1.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MACHINES_DIR = os.path.join(SCRIPT_DIR, 'machines')
+LOCATIONS_DIR = os.path.join(SCRIPT_DIR, 'locations')
 BOOTSTRAP_PATH = os.path.join(SCRIPT_DIR, 'bootstrap.py')
 LAUNCHER_PATH = os.path.join(SCRIPT_DIR, 'launcher.py')
 
@@ -81,7 +81,7 @@ class KnobServer:
         self.knob_addr = addr
 
         try:
-            buf = self._run_bootstrap(sock, buf)
+            buf = self._run_bootstrap(sock, buf, addr)
             if buf is None:
                 return
             print(f"[server] Bootstrap complete — entering command loop")
@@ -103,8 +103,8 @@ class KnobServer:
 
     # ── Bootstrap ───────────────────────────────────────────────────
 
-    def _run_bootstrap(self, sock, buf):
-        """3-step bootstrap: send code → receive GUID → send config → ack → send launcher."""
+    def _run_bootstrap(self, sock, buf, addr=None):
+        """3-step bootstrap: send code → receive GUID/location → send config → ack → send launcher."""
         try:
             with open(BOOTSTRAP_PATH) as f:
                 boot_code = f.read()
@@ -118,7 +118,25 @@ class KnobServer:
                 "_AVAILABLE_MACHINES = " + json.dumps(machines) + "\n"
             )
             boot_code = preamble + boot_code
-            print(f"[server] Injected {len(machines)} machines (v{SERVER_VERSION}) into bootstrap")
+            print(f"[server] Injected {len(machines)} machines (v{SERVER_VERSION}) into bootstrap (sim fallback)")
+
+        # A knob on the USB link is physically attached to THIS machine. Tell it
+        # which machine it's plugged into so its local bootstrap can preselect
+        # the location. On wifi (standalone) no guid is sent; the knob filters
+        # locations by the wifi networks it can see.
+        on_usb = self._knob_on_usb_link(addr)
+        machine_guid = self._os_machine_guid()
+        identify = {
+            "type": "identify",
+            "machine_guid": machine_guid if on_usb and machine_guid else "",
+            "device": platform.node(),
+            "usb": bool(on_usb),
+        }
+        self._send_ws_text(sock, json.dumps(identify))
+        if identify["machine_guid"]:
+            print(f"[server] USB link — identified as {machine_guid}")
+        else:
+            print(f"[server] Knob on {'USB' if on_usb else 'wifi/other'} link — no machine guid")
 
         print("[server] Sending bootstrap.py...")
         self._send_ws_text(sock, json.dumps({
@@ -129,6 +147,7 @@ class KnobServer:
         }))
 
         guid = None
+        location = None
         while True:
             frame, buf = self._recv_ws_frame(sock, buf)
             if frame is None: return None
@@ -139,11 +158,12 @@ class KnobServer:
             if d.get("type") == "bootstrap_response":
                 info = d.get("data", {})
                 guid = info.get("machine_guid", "")
+                location = info.get("location", "")
                 print(f"[server] Knob: machine={info.get('machine')} guid={guid} "
-                      f"version={info.get('server_version')} location={info.get('location')}")
+                      f"version={info.get('server_version')} location={location}")
                 break
 
-        config = self._match_machine(guid)
+        config = self._match_machine(location, guid)
         if config is None:
             config = {"name": "Knob", "apps": []}
 
@@ -224,39 +244,102 @@ class KnobServer:
                 print(f"[server] Bad manifest {mpath}: {e}")
         return manifests
 
-    def _match_machine(self, guid):
-        if not os.path.isdir(MACHINES_DIR):
+    def _match_machine(self, location, guid=""):
+        if not os.path.isdir(LOCATIONS_DIR):
             return None
-        for fname in os.listdir(MACHINES_DIR):
+        entries = []
+        for fname in os.listdir(LOCATIONS_DIR):
             if not fname.endswith('.json'):
                 continue
-            with open(os.path.join(MACHINES_DIR, fname)) as f:
+            with open(os.path.join(LOCATIONS_DIR, fname)) as f:
                 try:
                     cfg = json.load(f)
                 except json.JSONDecodeError:
                     continue
+            entries.append((fname, cfg))
+        # Prefer the location the knob selected during bootstrap.
+        if location:
+            for fname, cfg in entries:
+                if str(cfg.get("location", "")) == str(location):
+                    print(f"[server] Matched location {location} → {fname}")
+                    return cfg
+        # Fall back to the knob-reported machine guid (glob-friendly).
+        for fname, cfg in entries:
             if fnmatch.fnmatch(guid, cfg.get("machine_guid", "")):
-                print(f"[server] Matched {guid} → {fname}")
+                print(f"[server] Matched guid {guid} → {fname}")
                 return cfg
         return None
 
     def _load_machine_list(self):
         entries = []
-        if os.path.isdir(MACHINES_DIR):
-            for fname in sorted(os.listdir(MACHINES_DIR)):
+        if os.path.isdir(LOCATIONS_DIR):
+            for fname in sorted(os.listdir(LOCATIONS_DIR)):
                 if not fname.endswith('.json'):
                     continue
-                with open(os.path.join(MACHINES_DIR, fname)) as f:
+                with open(os.path.join(LOCATIONS_DIR, fname)) as f:
                     try:
                         cfg = json.load(f)
                     except json.JSONDecodeError:
                         continue
+                wifi = cfg.get("wifi") or {}
                 entries.append({
                     "guid": cfg.get("machine_guid", ""),
                     "name": cfg.get("name", ""),
-                    "location": cfg.get("location", "")
+                    "location": cfg.get("location", ""),
+                    "wifi": wifi.get("ssid", ""),
                 })
         return entries
+
+    def _load_settings(self):
+        """Server-side settings (fs1/settings.json) — static IPs, defaults."""
+        try:
+            with open(os.path.join(SCRIPT_DIR, 'settings.json')) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _knob_on_usb_link(self, addr):
+        """True if the knob connected over the static USB link rather than wifi."""
+        if not addr:
+            return False
+        settings = self._load_settings()
+        static_ip = (settings.get('static_ip') or {}).get('knob', '')
+        if not static_ip:
+            return False
+        return addr[0] == static_ip
+
+    @staticmethod
+    def _os_machine_guid():
+        """The stable machine identifier of THIS PC, per platform:
+        Windows — Software\\Microsoft\\Cryptography\\MachineGuid;
+        macOS — the hardware UUID (IOPlatformUUID);
+        Linux — /etc/machine-id."""
+        system = platform.system()
+        if system == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                     r"SOFTWARE\Microsoft\Cryptography")
+                value, _ = winreg.QueryValueEx(key, "MachineGuid")
+                return value
+            except Exception:
+                return ""
+        if system == "Darwin":
+            try:
+                out = subprocess.run(
+                    ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                    capture_output=True, text=True, timeout=5)
+                for line in out.stdout.splitlines():
+                    if "IOPlatformUUID" in line and '"' in line:
+                        return line.split('"')[3]
+            except Exception:
+                pass
+            return ""
+        try:
+            with open("/etc/machine-id") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
 
     # ── Command routing ─────────────────────────────────────────────
 

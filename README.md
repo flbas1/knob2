@@ -19,30 +19,33 @@ It's a very symbiotic relationship: the knob runs the UI and drives the whole ex
 | Folder | Contents | Git |
 |--------|----------|-----|
 | `fs1/` | `server.py`, `bootstrap.py`, `launcher.py`, machine configs, platform handlers, test simulator, mobile client shells | tracked |
-| `fs2/` | Firmware: `boot.py`, `main.py`, frozen drivers (`lib/`), ESP-IDF project, partition table | tracked |
+| `fs2/` | Firmware: `boot.py`, `main.py`, frozen drivers (`lib/`), `protocol/` — built via lv_micropython | tracked |
 | `hardware/` | ESP-IDF SDK, lv_micropython build, CrowPanel reference SDK, notes | **ignored** |
 
 ## Architecture
 
-The PC runs a small server (`fs1/server.py`) that drives a **bootstrap protocol** over WebSocket:
+The knob is **self-contained**: location configs (`/fs1/locations/`), `bootstrap.py`,
+and `launcher.py` all live in its own `fs1` FAT partition — it knows what locations
+exist with no server round-trip. The PC runs a small server (`fs1/server.py`) that
+provides the ongoing control channel:
 
-1. It serves `bootstrap.py` to the knob, which probes its identity and reports a machine GUID.
-2. The server matches that GUID against a config in `fs1/machines/{machine_guid}.json`.
-3. It sends the config, then serves `launcher.py`, which builds the app-launcher UI on the knob.
+1. On connect, the server sends `identify` (its OS machine GUID when the knob is on the USB link).
+2. `bootstrap.py` reads `/fs1/locations` and preselects the location matching that GUID, or wifi-filters when standalone.
+3. The server matches the chosen location to a config and sends it, then the knob runs `launcher.py`.
 4. From then on the **knob drives**: app selections and commands (volume up, brightness set, scroll, zoom) flow to the PC, which executes them via `KnobClient` platform handlers.
 
 ```
 ┌─────────────────────┐           ┌──────────────────────────────────┐
 │   THE KNOB (host)   │           │      PC SERVER (server.py)       │
 │                     │           │                                  │
-│  MicroPython + LVGL │           │  Bootstrap protocol:             │
-│  ├─ bootstrap.py*   │  WS :8765 │  1. Serve bootstrap.py → knob    │
-│  ├─ launcher.py*    │◄────────►│  2. Knob reports machine GUID     │
-│  ├─ plugin_*.py*    │           │  3. Match config → send config   │
-│                     │           │  4. Knob acks → serve launcher   │
-│  *served by server  │           │                                  │
+│  MicroPython + LVGL │           │  Control channel:                │
+│  ├─ bootstrap.py    │  WS :8765 │  1. identify (GUID on USB link)  │
+│  ├─ launcher.py     │◄────────►│  2. Knob picks location (local)   │
+│  ├─ plugin_*.py     │           │  3. Match config → send config   │
+│  ├─ locations/*.json│           │  4. Knob acks → runs launcher    │
+│  └─ settings.json   │           │                                  │
 │                     │           │  Command routing:                │
-│                     │           │  volume, brightness, scroll, zoom│
+│  *reads /fs1 locally│           │  volume, brightness, scroll, zoom│
 │                     │           │  → KnobClient platform handlers  │
 └─────────────────────┘           └──────────────────────────────────┘
 ```
@@ -52,17 +55,27 @@ The PC runs a small server (`fs1/server.py`) that drives a **bootstrap protocol*
 ```
 server.py                          Knob (physical or sim)
    │                                      │
+   │  ── Step 0 ──                        │
+   │  {"type":"identify",                 │
+   │    "machine_guid":"...","usb":true}  │
+   │─────────────────────────────────────►│
+   │                                      │  On the real knob bootstrap
+   │                                      │  reads /fs1/locations; the
+   │                                      │  sim runs server-served code
    │  ── Step 1 ──                        │
    │  {"type":"execute","code":"<boot>"}  │
    │─────────────────────────────────────►│
-   │                                      │  Runs bootstrap.py
+   │                                      │  Runs bootstrap.py: pick
+   │                                      │  location (GUID preselect /
+   │                                      │  wifi filter / all)
    │  {"type":"bootstrap_response",       │  reports identity
-   │    "data":{"machine_guid":"..."}}    │
+   │    "data":{"machine_guid":"...",     │  + chosen location
+   │             "location":"..."}}       │
    │◄─────────────────────────────────────│
    │                                      │
    │  ── Step 2 ──                        │
-   │  Match GUID → machine config         │
-   │  (literal GUID match, no globs)      │
+   │  Match location → config             │
+   │  (literal location match)            │
    │                                      │
    │  {"type":"config","config":{...}}    │
    │─────────────────────────────────────►│
@@ -87,7 +100,9 @@ server.py                          Knob (physical or sim)
    │─────────────────────────────────────►│
 ```
 
-The server injects the machine list into bootstrap code as `_AVAILABLE_MACHINES`, and the `execute` message carries a `machines` array so the simulator can populate its Machine dropdown.
+The server still injects the location list into the served bootstrap code as
+`_AVAILABLE_MACHINES`, but only as a **sim fallback** — the browser sim has no
+`/fs1`, so it needs the injected list; the real knob ignores it.
 
 ### Development Simulator
 
@@ -102,9 +117,10 @@ Browser ──WS :8766──► testKnob.py ──WS :8765──► server.py
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `execute` | Server → Knob | Run MicroPython code (includes `machines` array for sim dropdown) |
-| `bootstrap_response` | Knob → Server | Identity after bootstrap |
-| `config` | Server → Knob | Machine config |
+| `identify` | Server → Knob | Server identifies itself (machine GUID on USB link) |
+| `execute` | Server → Knob | Run MicroPython code (sim-only: `machines` array fallback) |
+| `bootstrap_response` | Knob → Server | Identity + chosen location after bootstrap |
+| `config` | Server → Knob | Location config |
 | `config_ack` | Knob → Server | Config accepted |
 | `launcher_ready` | Knob → Server | Launcher UI live |
 | `app_selected` | Knob → Server | User picked an app |
@@ -112,15 +128,18 @@ Browser ──WS :8766──► testKnob.py ──WS :8765──► server.py
 | `data_update` | Either | App-specific state push |
 | `data_request` | Knob → Server | Request current state |
 
-## Machine Configs
+## Location Configs
 
-Each machine has a config in `fs1/machines/` named after its literal GUID:
+Each location has a config in `fs1/locations/` (one per room). The `machine_guid`
+is matched against the PC's OS machine id over the USB link to preselect a room;
+`wifi.ssid` filters the picker when the knob is standalone:
 
 ```json
 {
     "name": "Development Sim",
     "machine_guid": "sim-dev-001",
     "location": "Simulator",
+    "wifi": {"ssid": "home_wifi", "password": "hunter2"},
     "haptic": false,
     "sound": false,
     "backlight": 100,
@@ -131,7 +150,7 @@ Each machine has a config in `fs1/machines/` named after its literal GUID:
 }
 ```
 
-The filename is `{machine_guid}.json` (e.g. `sim-dev-001.json`). `location` describes where the machine lives (Simulator, Office, Home, …).
+`location` is what the bootstrap picker shows (Simulator, Office, Home Bedroom, …).
 
 ## Hardware
 
@@ -179,7 +198,7 @@ Dual MCU: ESP32-S3R8 (main, 16MB Flash / 8MB PSRAM) + ESP32-U4WDH (companion, 4M
 
 1. **Encoder is NOT quadrature** — The rotary knob uses two independent micro-switches, not a standard quadrature encoder. Switch A goes LOW while turning CW, switch B goes LOW while turning CCW. Standard quadrature decoding will not work.
 
-2. **USB-C plug orientation matters** — Behind the USB-C port is a CH334 USB hub with two devices: CH343 UART bridge (companion ESP32) and native ESP32-S3 USB-OTG. Which one is active depends on the plug orientation. If flashing fails with "This chip is ESP32, not ESP32-S3", flip the plug.
+2. **USB-C plug orientation selects the download channel** (Waveshare FAQ: "the two insertion orientations of the Type-C plug connect to different download channels") — one orientation exposes the native ESP32-S3 USB-OTG (`usbmodem` / `ttyACM0`), the other the CH343 UART bridge to the companion ESP32 (`usbserial` / `ttyUSB0`). On the wrong channel esptool correctly reports "This chip is ESP32, not ESP32-S3" — flip the plug 180° and re-insert.
 
 3. **GPIO 0 is PCM5100A enable**, not an encoder button. The encoder has no push button.
 
@@ -188,6 +207,8 @@ Dual MCU: ESP32-S3R8 (main, 16MB Flash / 8MB PSRAM) + ESP32-U4WDH (companion, 4M
 5. **Touch requires hardware reset** — CST816 needs a RST pulse (LOW→HIGH) before I2C will respond. TOUCH_INT must be INPUT_PULLUP.
 
 6. **LVGL encoder coexistence** — LVGL's pointer device steals encoder focus when you touch the screen. Drive the arc value directly in the main loop instead of using LVGL's encoder indev group.
+
+7. **Download mode / BOOT button** (wiki: "press and hold the button, power on again to enter download mode") — this board has **no reset button**; to enter ESP32-S3 download mode hold **BOOT**, then unplug and re-plug the USB power (keep BOOT held until the port appears), then release. Over native USB the chip re-enumerates as it drops into download mode, so esptool's default reset can drop the connection ("The chip stopped responding") — enter download mode manually with BOOT, or use `--before=usb_reset` (esptool ≥ 3.3).
 
 ### Resource Links
 
@@ -202,6 +223,23 @@ Dual MCU: ESP32-S3R8 (main, 16MB Flash / 8MB PSRAM) + ESP32-U4WDH (companion, 4M
 | ESP32-S3 datasheet | https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf |
 | ESP32-S3 technical reference | https://www.espressif.com/sites/default/files/documentation/esp32_technical_reference_manual_en.pdf |
 | LVGL documentation | https://docs.lvgl.io/master/intro/introduction/index.html |
+
+### Arduino IDE (hardware testing / recovery)
+
+The wiki documents full Arduino IDE support. Useful to verify the hardware
+independently of this firmware — **but flashing a sketch replaces MicroPython**,
+so re-flash `micropython.bin` (see `fs2/README.md` → Flash) when done:
+
+- Board package: **esp32 by Espressif Systems, ≥ 3.2.0** (Board Manager).
+- Libraries: **SensorLib v0.3.1** (online) + **lvgl v8.4.0** (offline, from
+  `ESP32-S3-Knob-Touch-LCD-1.8-Demo/Arduino/libraries`).
+- Per-peripheral demos in the official demo zip: 01_ADC, 02_SD_Card,
+  03_DRV2605, 04_Encoder, 05_WIFI_AP, 06_WIFI_STA, 07_Audio, 08_LVGL_Test.
+- If a flash leaves "waiting for download..." on the serial port, power-cycle
+  (unplug/re-plug USB — there is no reset button).
+- For flash recovery without the CLI: the esp32 board package's built-in esptool
+  can **Erase Flash**, or use Espressif's browser flasher
+  https://webflasher.espressif.com/ (Chrome/Edge WebSerial).
 
 ### Third-Party Projects
 
@@ -260,16 +298,16 @@ Dual MCU: ESP32-S3R8 (main, 16MB Flash / 8MB PSRAM) + ESP32-U4WDH (companion, 4M
 ## Transport
 
 1. **USB CDC-Ether** (primary) — knob appears as network interface, static IPs: knob `10.10.10.1`, PC `10.10.10.2`
-2. **WiFi** (fallback) — `fs1/settings.json` stores SSID/password; the knob opens a WebSocket to `ws://10.10.10.2:8765`
+2. **WiFi** — the knob joins the wifi of the **chosen location** (`fs1/locations/<name>.json`), not settings.json; on the PC-app path it then opens a WebSocket to the PC server's `websocket_uri` from `fs1/settings.json`. Standalone, no server is needed at all — the knob talks to home devices (lights, curtains) directly.
 
-## Machine Detection
+## Location Detection
 
 When the knob connects to the server:
 
-1. Server serves `bootstrap.py` — the knob probes its identity (USB descriptor, hostname, MAC) and reports a machine GUID
-2. Server matches `fs1/machines/{machine_guid}.json`
-3. Server sends the matched config, then `launcher.py` — which enables the apps/plugins in that config
-4. If no config matches, the knob enters setup mode on the display
+1. The PC server sends `identify` — its OS machine id (Windows `SOFTWARE\Microsoft\Cryptography\MachineGuid`, macOS hardware UUID, Linux `/etc/machine-id`).
+2. `bootstrap.py` reads the knob's **own** `/fs1/locations/` configs and preselects the one whose `machine_guid` matches (auto-confirmed when unique). Standalone it filters by reachable `wifi.ssid`; otherwise it shows all locations.
+3. The chosen location is reported in `bootstrap_response`; the server sends the matching config, then the launcher runs — enabling that config's apps/plugins.
+4. If nothing matches, the knob shows setup mode (all locations).
 
 ## Quick Start
 
@@ -287,14 +325,35 @@ The full bootstrap → config → launcher flow runs transparently through the b
 ### Build & Flash Firmware
 
 ```bash
-cd fs2
-idf.py set-target esp32s3
-idf.py menuconfig
-idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+# 1) Build — MicroPython + LVGL via lv_micropython, board WAVESHARE_ESP32_S3_KNOB
+cd hardware/lv_micropython/ports/esp32
+. $IDF_PATH/export.sh                     # ESP-IDF v5.3 — set IDF_PATH first
+idf.py -B build-WAVESHARE_ESP32_S3_KNOB -D MICROPY_BOARD=WAVESHARE_ESP32_S3_KNOB build
+
+# 2) Flash — from a machine with the board plugged in via the edge USB-C
+idf.py -B build-WAVESHARE_ESP32_S3_KNOB -p /dev/ttyUSB0 flash monitor
 ```
 
-See `fs2/README.md` for details.
+If flashing fails with "This chip is ESP32, not ESP32-S3", **flip the USB-C plug 180°** (the CH334 hub switches between the CH343 UART bridge and native USB-OTG by plug orientation).
+
+**First boot only — populate `/fs1`.** The `fs1` FAT partition (3MB @ 0x10000) formats empty on first boot. `boot.py`, `main.py`, `launcher.py`, `lib/`, and `protocol/` are frozen into the firmware, but `bootstrap.py`, `server.py`, `settings.json`, `locations/`, and `plugins/` are filesystem payload that must be copied to the device:
+
+```bash
+mpremote connect /dev/ttyACM0 mkdir :/fs1
+mpremote connect /dev/ttyACM0 mkdir :/fs1/locations
+mpremote connect /dev/ttyACM0 mkdir :/fs1/plugins
+mpremote connect /dev/ttyACM0 cp fs1/settings.json :/fs1/settings.json
+mpremote connect /dev/ttyACM0 cp fs1/bootstrap.py :/fs1/bootstrap.py
+mpremote connect /dev/ttyACM0 cp fs1/server.py :/fs1/server.py
+mpremote connect /dev/ttyACM0 cp fs1/locations/*.json :/fs1/locations/
+for p in fs1/plugins/*; do
+  mpremote connect /dev/ttyACM0 mkdir :/fs1/plugins/$(basename "$p")
+  mpremote connect /dev/ttyACM0 cp "$p/manifest.json" "$p/plugin.py" "/fs1/plugins/$(basename "$p")/"
+done
+mpremote connect /dev/ttyACM0 reset
+```
+
+Full build + deploy details in `fs2/README.md`.
 
 ### Mobile Clients
 

@@ -58,7 +58,7 @@ class Hardware:
 
     def _init_i2c(self):
         """Initialize I2C bus at 100kHz for CST816 stability."""
-        self.i2c = I2C(0, scl=Pin(PIN_TOUCH_SCL), sdain=Pin(PIN_TOUCH_SDA), freq=100000)
+        self.i2c = I2C(0, scl=Pin(PIN_TOUCH_SCL), sda=Pin(PIN_TOUCH_SDA), freq=100000)
 
     def _init_backlight(self):
         """Initialize backlight PWM on GPIO 47."""
@@ -69,7 +69,12 @@ class Hardware:
         self.backlight.duty(brightness & 0xFF)
 
     def init_display(self):
-        """Initialize SH8601 display. Called after LVGL is ready."""
+        """Initialize SH8601 display. Called after LVGL is ready.
+
+        Idempotent — reuses the existing display so the launcher never
+        registers a second LVGL display driver."""
+        if self.display is not None:
+            return self.display
         from sh8601 import SH8601
         self.display = SH8601(
             cs=PIN_LCD_CS, sclk=PIN_LCD_SCLK,
@@ -82,20 +87,26 @@ class Hardware:
         return self.display
 
     def init_touch(self):
-        """Initialize CST816 touch controller."""
+        """Initialize CST816 touch controller. Idempotent."""
+        if self.touch is not None:
+            return self.touch
         from cst816 import CST816
         self.touch = CST816(self.i2c, PIN_TOUCH_RST, PIN_TOUCH_INT)
         self.touch.init()
         return self.touch
 
     def init_encoder(self):
-        """Initialize encoder GPIO pins."""
+        """Initialize encoder GPIO pins. Idempotent."""
+        if self.encoder is not None:
+            return self.encoder
         from encoder import Encoder
         self.encoder = Encoder(PIN_ENCODER_A, PIN_ENCODER_B)
         return self.encoder
 
     def init_haptic(self):
-        """Initialize DRV2605 haptic motor driver."""
+        """Initialize DRV2605 haptic motor driver. Idempotent."""
+        if self.haptic is not None:
+            return self.haptic
         from drv2605 import DRV2605
         self.haptic = DRV2605(self.i2c, enable_pin=PIN_DAC_ENABLE)
         self.haptic.init()

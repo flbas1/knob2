@@ -7,5 +7,6 @@ server.log
 **/build_knob/
 **/build_test/
 hardware/esp-idf/
-# hardware/CrowPanel-*/
+hardware/CrowPanel-*/
 hardware/lv_micropython/
+hardware/knob-lv-micropython.tar.gz

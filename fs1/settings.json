@@ -1,17 +1,8 @@
 {
-    "wifi": {
-        "ssid": "",
-        "password": ""
-    },
+    "boot_backlight": 200,
     "websocket_uri": "ws://10.10.10.2:8765",
     "static_ip": {
         "knob": "10.10.10.1",
         "pc": "10.10.10.2"
-    },
-    "defaults": {
-        "volume_sensitivity": 3,
-        "scroll_sensitivity": 1,
-        "screen_brightness": 150,
-        "backlight": 200
     }
 }

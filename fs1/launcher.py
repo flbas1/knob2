@@ -159,8 +159,8 @@ def _exec_plugin(app_id, code):
 class Launcher:
     """Home screen launcher with app switching."""
 
-    def __init__(self):
-        self.hardware = None
+    def __init__(self, hardware=None):
+        self.hardware = hardware
         self.plugin_mgr = None
         self.ws_client = None
         self.hid = None
@@ -187,24 +187,28 @@ class Launcher:
 
     def run(self):
         """Main entry point. Initializes everything and runs the event loop."""
-        # Initialize hardware
-        try:
-            from hardware import Hardware
-            self.hardware = Hardware()
+        # Initialize hardware (reuse a pre-built one from main.py when given —
+        # the display/touch/encoder are then already initialized).
+        if self.hardware is None:
             self.sim_mode = False
-        except ImportError:
-            class _SimHardware:
-                encoder = None
-                touch = None
-                def init_display(self):
-                    pass
-                def init_touch(self):
-                    return None
-                def init_encoder(self):
-                    pass
-            self.hardware = _SimHardware()
-            self.sim_mode = True
-            print("[launcher] Simulator mode — hardware module not available")
+            try:
+                from hardware import Hardware
+                self.hardware = Hardware()
+            except ImportError:
+                class _SimHardware:
+                    encoder = None
+                    touch = None
+                    def init_display(self):
+                        pass
+                    def init_touch(self):
+                        return None
+                    def init_encoder(self):
+                        pass
+                self.hardware = _SimHardware()
+                self.sim_mode = True
+                print("[launcher] Simulator mode — hardware module not available")
+        else:
+            self.sim_mode = False
 
         if not LVGL_AVAILABLE:
             print("[launcher] LVGL not available. Exiting.")
@@ -312,26 +316,54 @@ class Launcher:
                 print("[launcher] Using stdout JSON WS bridge (sim)")
 
     def _load_ws_uri(self):
-        """Load WebSocket URI from settings or use default."""
+        """Load WebSocket URI from settings or use default.
+
+        On the USB link the PC server is always at the static address
+        (10.10.10.2); standalone on wifi it's the LAN URI in settings.json.
+        """
         try:
             with open('/fs1/settings.json', 'r') as f:
                 settings = json.load(f)
+            try:
+                from wifi_connect import on_usb_link
+                if on_usb_link():
+                    return 'ws://10.10.10.2:8765'
+            except Exception:
+                pass
             return settings.get('websocket_uri', 'ws://10.10.10.2:8765')
         except:
             return 'ws://10.10.10.2:8765'
 
     def _load_machine_config(self):
-        """Load machine config from fs1/machines/."""
+        """Load the machine config for the knob's chosen location from /fs1/locations/.
+
+        Prefers the location bootstrap.py chose (saved in /fs1/.state.json by
+        main.py on the real knob); falls back to the first config found."""
+        chosen = None
         try:
-            machines = os.listdir('/fs1/machines') if os else []
-            for fname in machines:
+            with open('/fs1/.state.json', 'r') as f:
+                chosen = json.load(f).get('location')
+        except Exception:
+            pass
+        try:
+            locations = os.listdir('/fs1/locations') if os else []
+            if chosen:
+                for fname in locations:
+                    if fname.endswith('.json'):
+                        with open(f'/fs1/locations/{fname}', 'r') as f:
+                            cfg = json.load(f)
+                        if cfg.get('location') == chosen:
+                            self.machine_config = cfg
+                            print(f"[launcher] Loaded machine: {cfg.get('name', fname)} ({chosen})")
+                            return
+            for fname in locations:
                 if fname.endswith('.json'):
-                    with open(f'/fs1/machines/{fname}', 'r') as f:
+                    with open(f'/fs1/locations/{fname}', 'r') as f:
                         self.machine_config = json.load(f)
                     print(f"[launcher] Loaded machine: {self.machine_config.get('name', fname)}")
                     return
         except (OSError, AttributeError):
-            print("[launcher] No machines directory found — all plugins enabled")
+            print("[launcher] No locations directory found — all plugins enabled")
 
     def _load_apps(self):
         """Build the app list from server injection, machine config, or local manifests."""
@@ -367,6 +399,16 @@ class Launcher:
                 entry['icon'] = a.get('icon') or man.get('icon')
                 entry['icon_data'] = a.get('icon_data') or man.get('icon_data')
                 entry['code'] = a.get('code') or man.get('code')
+                self.apps.append(entry)
+            # Auto-discovery: any plugin dropped into /fs1/plugins/ that isn't
+            # listed in the config/server appears anyway — this is how you can
+            # drop in a girlfriend.py/boyfriend.py and have it show up.
+            seen = {a['id'] for a in self.apps}
+            for pid, man in manifests.items():
+                if pid in seen:
+                    continue
+                entry = dict(man)
+                entry['id'] = pid
                 self.apps.append(entry)
         else:
             for pid, man in manifests.items():
@@ -675,10 +717,10 @@ class Launcher:
     def _load_machine_config_for_device(self, device, platform):
         """Try to load a machine config matching the connected device."""
         try:
-            machines = os.listdir('/fs1/machines') if os else []
+            machines = os.listdir('/fs1/locations') if os else []
             for fname in machines:
                 if fname.endswith('.json'):
-                    with open(f'/fs1/machines/{fname}', 'r') as f:
+                    with open(f'/fs1/locations/{fname}', 'r') as f:
                         config = json.load(f)
                     # Match by name or platform
                     if (config.get('machine_id') == device or
